@@ -9,7 +9,7 @@ from galpin_27_36.ahk import helper as ahk
 import time
 import datetime
 
-url = "https://www.reddit.com/r/EarthPorn/top.json?t=day"
+url = "http://www.reddit.com/r/EarthPorn/top.json?t=day&limit=100"
 minute_interval = 60
 data = None
 
@@ -22,8 +22,8 @@ def main():
         os.makedirs(directory)
 
     while True:
-        update_json(os.path.join(directory, 'earthporn.json'))
-        load_wallpaper(directory, monitors, screen)
+        if update_json(os.path.join(directory, 'earthporn.json')):
+            load_wallpaper(directory, monitors, screen)
         time.sleep(60)
 
 
@@ -35,11 +35,11 @@ def update_json(path):
         if is_recent_file:
             with open(path, 'r', encoding='utf-8') as f:
                 data = json.load(f)
-            return
+            return False
 
         is_time_to_fetch = datetime.datetime.now().time().minute % minute_interval == 0
         if data is not None and not is_time_to_fetch:
-            return
+            return False
 
     print(datetime.datetime.now(), "fetching JSON")
     req = urllib.request.Request(url, data=None, headers={'User-Agent': 'Python 3.6.1 (Windows NT 10.0):wallpaper-galpin:v1.0 (by /u/CodeOptimist)'})
@@ -48,12 +48,13 @@ def update_json(path):
         with open(path, 'w', encoding='utf-8') as f:
             f.write(data_str)
         data = json.loads(data_str)
+    return True
 
 
 def load_wallpaper(directory, monitors, screen):
     wallpaper = Image.new("RGB", (screen['w'], screen['h']))
     for idx, monitor in monitors.items():
-        img_path = get_image(directory, monitor)
+        img_path = get_img(directory, monitor)
         img = Image.open(img_path)
         img = PIL.ImageOps.fit(img, (monitor['w'], monitor['h']), PIL.Image.LANCZOS)
         # img.save(os.path.join(directory, '{}.jpg'.format(idx)))
@@ -62,6 +63,7 @@ def load_wallpaper(directory, monitors, screen):
     wallpaper_path = os.path.join(directory, 'wallpaper.jpg')
     wallpaper.save(wallpaper_path)
     ahk.execute(r'DllCall("SystemParametersInfo", UInt, 0x14, UInt, 0, Str, "{}", UInt, 2)'.format(wallpaper_path))
+    # print(datetime.datetime.now(), "loaded")
 
 
 def get_monitor_info():
@@ -106,7 +108,7 @@ def get_screen_info():
     return result
 
 
-def get_image(directory, monitor):
+def get_img(directory, monitor):
     for img_json in data['data']['children']:
         if 'is_retrieved' in img_json:
             continue
@@ -124,9 +126,14 @@ def get_image(directory, monitor):
         if not is_oriented_same:
             continue
 
+        img_url = img_json['data']['url']
+        if '//imgur.com/' in img_url:
+            img_url = img_url.replace('//imgur.com/', '//i.imgur.com/') + '.jpg'
+        if not img_url.endswith(r'.jpg') and not img_url.endswith(r'.jpeg'):
+            continue
+
         try:
-            img_url = img_json['data']['url']
-            img_path = get_img(directory, img_url)
+            img_path = fetch_img(directory, img_url, title)
         except Exception:
             continue
 
@@ -135,15 +142,22 @@ def get_image(directory, monitor):
     return None
 
 
-def get_img(directory, img_url):
+def fetch_img(directory, img_url, title):
     img_filename = os.path.basename(img_url)
     img_path = os.path.join(directory, img_filename)
-    if not os.path.isfile(img_path):
+
+    if os.path.isfile(img_path):
+        age = time.time() - os.path.getmtime(img_path)
+        is_old_file = age > minute_interval * 60
+        if is_old_file:
+            raise FileExistsError
+        print(datetime.datetime.now(), "       ", img_path, title)
+    else:
         with urllib.request.urlopen(img_url) as response:
             img_data = response.read()
         with open(img_path, "wb") as f:
             f.write(img_data)
-        print(img_path)
+        print(datetime.datetime.now(), "fetched", img_path, title)
     return img_path
 
 
