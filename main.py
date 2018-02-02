@@ -37,9 +37,9 @@ def update_json(path):
                 data = json.load(f)
             return False
 
-        is_time_to_fetch = datetime.datetime.now().time().minute % minute_interval == 0
-        if data is not None and not is_time_to_fetch:
-            return False
+    is_time_to_fetch = datetime.datetime.now().time().minute % minute_interval == 0
+    if data is not None and not is_time_to_fetch:
+        return False
 
     print(datetime.datetime.now(), "fetching JSON")
     req = urllib.request.Request(url, data=None, headers={'User-Agent': 'Python 3.6.1 (Windows NT 10.0):wallpaper-galpin:v1.0 (by /u/CodeOptimist)'})
@@ -54,8 +54,8 @@ def update_json(path):
 def load_wallpaper(directory, monitors, screen):
     wallpaper = Image.new("RGB", (screen['w'], screen['h']))
     for idx, monitor in monitors.items():
-        img_path = get_img(directory, monitor)
-        img = Image.open(img_path)
+        img = get_img(directory, monitor)
+        print("found", idx)
         img = PIL.ImageOps.fit(img, (monitor['w'], monitor['h']), PIL.Image.LANCZOS)
         # img.save(os.path.join(directory, '{}.jpg'.format(idx)))
         wallpaper.paste(img, (monitor['x'] - screen['x'], monitor['y'] - screen['y']))
@@ -89,41 +89,34 @@ def get_monitor_info():
 
 def get_screen_info():
     result = {}
-    SM_CMONITORS = 80
-    ahk.execute(r'SysGet, numMon, {}'.format(SM_CMONITORS))
-    result['num'] = ahk.get('numMon')
-
-    SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN = (78, 79)
-    ahk.execute(r'SysGet, virtualScreenW, {}'.format(SM_CXVIRTUALSCREEN))
-    result['w'] = int(ahk.get('virtualScreenW'))
-    ahk.execute(r'SysGet, virtualScreenH, {}'.format(SM_CYVIRTUALSCREEN))
-    result['h'] = int(ahk.get('virtualScreenH'))
-
-    SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN = (76, 77)
-    ahk.execute(r'SysGet, virtualScreenX, {}'.format(SM_XVIRTUALSCREEN))
-    result['x'] = int(ahk.get('virtualScreenX'))
-    ahk.execute(r'SysGet, virtualScreenY, {}'.format(SM_YVIRTUALSCREEN))
-    result['y'] = int(ahk.get('virtualScreenY'))
-
+    SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_CMONITORS = (76, 77, 78, 79, 80)
+    for c, n in zip(('x', 'y', 'w', 'h', 'num'), (SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_CMONITORS)):
+        ahk.execute(r'SysGet, result, {}'.format(n))
+        result[c] = int(ahk.get('result'))
     return result
 
 
 def get_img(directory, monitor):
     for img_json in data['data']['children']:
-        if 'is_retrieved' in img_json:
+        if 'is_checked' in img_json:
             continue
+        img_json['is_checked'] = True
 
         title = img_json['data']['title']
-        m = re.search(r'[\[(]\s*(?P<w>\d+)\s*\D\s*(?P<h>\d+)[)\]]', title)
+        link_flair_text = img_json['data']['link_flair_text'] or ''
+        dimension_re = r'[\[(]\s*(?P<w>\d+)\s*\D\s*(?P<h>\d+)[)\]]'
+        m = re.search(dimension_re, link_flair_text)
         if m is None:
-            continue
+            m = re.search(dimension_re, title)
+            if m is None:
+                continue
 
+        # can't tell for certain before downloading whether dimensions are given as WxH or HxW
         w = int(m.group('w'))
         h = int(m.group('h'))
-        if w < monitor['w'] or h < monitor['h']:
+        if min(w, h) < min(monitor['w'], monitor['h']):
             continue
-        is_oriented_same = (monitor['w'] / monitor['h'] > 1) == (w / h > 1)
-        if not is_oriented_same:
+        if max(w, h) < max(monitor['w'], monitor['h']):
             continue
 
         img_url = img_json['data']['url']
@@ -137,8 +130,17 @@ def get_img(directory, monitor):
         except Exception:
             continue
 
-        img_json['is_retrieved'] = True
-        return img_path
+        img = Image.open(img_path)
+        w, h = img.size
+        if w < monitor['w'] or h < monitor['h']:
+            continue
+
+        is_oriented_same = (monitor['w'] / monitor['h'] >= 1) == (w / h >= 1)
+        if not is_oriented_same:
+            # tends to look bad
+            continue
+
+        return img
     return None
 
 
