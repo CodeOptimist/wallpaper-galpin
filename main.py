@@ -14,12 +14,12 @@ import glob
 
 url = "http://www.reddit.com/r/EarthPorn/top.json?t=week&limit=100"
 after = ""
-minute_interval = 60 * 3
+minute_interval = 60 * 4
 required_fit_percent = 0.00
 app_dir = r"C:\Working\earthporn"
-app_data = None
 tmp_dir = os.path.join(app_dir, 'tmp')
 json_path = os.path.join(app_dir, 'earthporn.json')
+app_data = None
 json_data = None
 
 
@@ -30,7 +30,7 @@ def main():
     if not os.path.isdir(app_dir):
         os.makedirs(app_dir)
     if not os.path.isdir(tmp_dir):
-        os.mkdir(tmp_dir)
+        os.makedirs(tmp_dir)
 
     data_path = os.path.join(app_dir, 'data.bin')
     if os.path.isfile(data_path):
@@ -63,6 +63,9 @@ def update_json():
 
     is_time_to_fetch = datetime.datetime.now().time().minute % math.gcd(minute_interval, 60) == 0
     if json_data is not None and not is_time_to_fetch:
+        return False
+
+    if ahk.f('A_TimeIdlePhysical') / 1000 / 60 >= minute_interval:
         return False
 
     return fetch_json()
