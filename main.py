@@ -160,21 +160,20 @@ def set_wallpaper(wallpaper_path):
 
 def get_monitor_info():
     screen = get_screen_info()
+
+    PROCESS_PER_MONITOR_DPI_AWARE = 0x2
+    ahk.execute('DllCall("Shcore.dll\SetProcessDpiAwareness", Int, {})'.format(PROCESS_PER_MONITOR_DPI_AWARE))
+
     monitors = OrderedDict()
     for idx in range(1, screen['num'] + 1):
         monitors[idx] = {}
         ahk.execute(r'SysGet, mon{0}, Monitor, {0}'.format(idx))
         l, t, r, b = [int(ahk.get('mon{}{}'.format(idx, side))) for side in ("Left", "Top", "Right", "Bottom")]
 
-        MONITOR_DEFAULTTONEAREST = 0x2
-        h_monitor = ahk.f('DllCall("MonitorFromPoint", Int, {}, Int, {}, UInt, {})'.format(l, t, MONITOR_DEFAULTTONEAREST))
-        ahk.execute(r'DllCall("Shcore.dll\GetScaleFactorForMonitor", Ptr, {}, "UInt *", scaleFactor)'.format(h_monitor))
-        scale = ahk.get('scaleFactor') / 100
-
         monitors[idx]['x'] = l
         monitors[idx]['y'] = t
-        monitors[idx]['w'] = int((r - l) * scale)
-        monitors[idx]['h'] = int((b - t) * scale)
+        monitors[idx]['w'] = r - l
+        monitors[idx]['h'] = b - t
     print(monitors)
     return monitors, screen
 
