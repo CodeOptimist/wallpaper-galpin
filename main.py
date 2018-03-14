@@ -1,15 +1,8 @@
-import requests
-import json
-import os
-import re
+import requests, json, os, re, math, glob, tempfile, pytz, tzlocal, time
 import PIL.ImageOps
-import math
 from PIL import Image
 from collections import OrderedDict
-import time
-import datetime
-import glob
-import tempfile
+from datetime import datetime, timedelta
 from autohotkey import AutoHotkey
 from gen.ShObjIdl_core import IDesktopWallpaper, DWPOS_SPAN
 from comtypes.client import CreateObject
@@ -25,62 +18,97 @@ sub_json_path = os.path.join(app_dir, sub + '.json')
 sub_json = None
 app_json_path = os.path.join(app_dir, sub + '-local.json')
 app_json = None
-minute_interval = 60 * 1
+last_updated_at = datetime.min
+
+
+def init():
+    global app_json, sub_json, last_updated_at
+    try:
+        os.makedirs(app_dir)
+        os.makedirs(tmp_dir)
+    except FileExistsError:
+        pass
+
+    app_json_defaults = {'last_updated': 0, 'accepted': [], 'rejected': []}
+    try:
+        with open(app_json_path, 'r') as f:
+            app_json = json.load(f)
+    except FileNotFoundError:
+        app_json = app_json_defaults
+    for k, v in app_json_defaults.items():
+        if k not in app_json:
+            app_json[k] = v
+
+    try:
+        with open(sub_json_path, 'r') as f:
+            sub_json = json.load(f)
+    except FileNotFoundError:
+        pass
+
+    PROCESS_PER_MONITOR_DPI_AWARE = 0x2
+    ahk.execute('DllCall("Shcore.dll\SetProcessDpiAwareness", Int, {})'.format(PROCESS_PER_MONITOR_DPI_AWARE))
 
 
 def main():
-    global app_json, after, minute_interval
-    monitors, screen = get_monitor_info()
-    minute_interval = 60 * len(monitors)
+    global app_json, after
 
-    if not os.path.isdir(app_dir):
-        os.makedirs(app_dir)
-    if not os.path.isdir(tmp_dir):
-        os.makedirs(tmp_dir)
-
-    if os.path.isfile(app_json_path):
-        with open(app_json_path, 'r') as f:
-            app_json = json.load(f)
-    else:
-        app_json = {'accepts': [], 'rejects': []}
-
+    just_ran = True
     while True:
-        if update_json():
+        monitors, screen = get_monitor_info()
+        update_every_m = 60 * len(monitors)
+        print("Monitors: '{}' Update frequency: '{}'".format(len(monitors), str(timedelta(minutes=update_every_m))[:-3].zfill(5)), end='\r', flush=True)
+
+        clock_interval_m = math.gcd(update_every_m, 60)
+        update_due_at = get_last_updated_at(clock_interval_m) + timedelta(minutes=update_every_m)
+        is_update_due = datetime.now(pytz.utc) > update_due_at
+        on_the_mark = datetime.now(pytz.utc).time().minute % clock_interval_m == 0
+        is_machine_idle = ahk.f('A_TimeIdlePhysical') / 1000 / 60 >= update_every_m
+        if is_update_due and (just_ran or on_the_mark and not is_machine_idle):
+            just_ran = False
+            print()
+            fetch_json()
             old_tmp = list(glob.glob(os.path.join(tmp_dir, '*.*'), recursive=False))
             if load_wallpaper(monitors, screen):
                 after = ""
+                app_json['last_updated'] = datetime.now(pytz.utc).timestamp()
             with open(app_json_path, 'w') as f:
-                json.dump(app_json, f, sort_keys=True, indent=4)
+                json.dump(app_json, f, indent=4)
             for entry in old_tmp:
                 if os.path.isfile(entry):
                     os.remove(entry)
-        time.sleep(60)
+        else:
+            # noinspection PyTypeChecker
+            update_in = update_due_at - datetime.now(pytz.utc) + timedelta(minutes=1)
+            update_in -= timedelta(microseconds=update_in.microseconds)
+            print("Monitors: '{}' Update frequency: '{}' Next update in: '{}' at: '{}'".format(
+                len(monitors),
+                str(timedelta(minutes=update_every_m))[:-3].zfill(5),
+                str(update_in)[:-3].zfill(5),
+                update_due_at.astimezone(tzlocal.get_localzone()),
+            ), end='\r', flush=True)
+        time.sleep(30)
 
 
-def update_json():
-    global sub_json
-    if os.path.isfile(sub_json_path):
-        age = time.time() - os.path.getmtime(sub_json_path)
-        is_recent_file = age <= minute_interval * 60
-        if is_recent_file:
-            with open(sub_json_path, 'r') as f:
-                sub_json = json.load(f)
-            return False
+def get_last_updated_at(clock_interval_m):
+    dt = datetime.utcfromtimestamp(app_json['last_updated']).replace(tzinfo=pytz.utc)
+    dt_rounded = round_time(dt, timedelta(minutes=clock_interval_m))
+    return dt_rounded
 
-    is_time_to_fetch = datetime.datetime.now().time().minute % math.gcd(minute_interval, 60) == 0
-    if sub_json is not None and not is_time_to_fetch:
-        return False
 
-    if ahk.f('A_TimeIdlePhysical') / 1000 / 60 >= minute_interval:
-        return False
-
-    return fetch_json()
+def round_time(dt, round_to, func=math.floor):
+    dt = dt.replace(microsecond=0)
+    s = (dt - dt.replace(hour=0, minute=0, second=0)).total_seconds()
+    round_s = round_to.total_seconds()
+    rounded_s = func((s + round_s / 2) / round_s) * round_s
+    diff = timedelta(seconds=rounded_s - s)
+    result = dt + diff
+    return result
 
 
 def fetch_json():
     global sub_json
     json_url = "{}&after={}".format(url, after)
-    print(datetime.datetime.now(), "fetching", json_url)
+    print(datetime.now(), "fetching", json_url)
     try:
         response = requests.get(json_url, headers={'User-Agent': 'Python 3.6.1 (Windows NT 10.0):wallpaper-galpin:v2.0 (by /u/CodeOptimist)'}, timeout=5)
         sub_json = response.json()
@@ -96,15 +124,15 @@ def load_wallpaper(monitors, screen):
     global after
     wallpaper = Image.new("RGB", (screen['w'], screen['h']))
     for idx, monitor in monitors.items():
-        mon_rejects = 'rejects_{}_{}'.format(monitor['w'], monitor['h'])
-        if mon_rejects not in app_json:
-            app_json[mon_rejects] = []
+        mon_rejected = 'rejected_{}_{}'.format(monitor['w'], monitor['h'])
+        if mon_rejected not in app_json:
+            app_json[mon_rejected] = []
 
         try:
             for _json_attempt_idx in range(2):
                 for img_json in sub_json['data']['children']:
                     img_name = os.path.basename(img_json['data']['url'])
-                    already_seen = any(img_name in app_json[k] for k in ('accepts', 'rejects', mon_rejects))
+                    already_seen = any(img_name in app_json[k] for k in ('accepted', 'rejected', mon_rejected))
                     if already_seen:
                         continue
 
@@ -113,15 +141,14 @@ def load_wallpaper(monitors, screen):
                         fit_img = PIL.ImageOps.fit(img, (monitor['w'], monitor['h']), PIL.Image.LANCZOS)
                         name, ext = os.path.splitext(os.path.basename(img_path))
                         fit_img.save(os.path.join(tmp_dir, name + '_fit' + '.png'))
-                        print(datetime.datetime.now(), "found", idx, os.path.basename(img_path), img_json['data']['title'])
+                        print(datetime.now(), "found", idx, os.path.basename(img_path), img_json['data']['title'])
                         wallpaper.paste(fit_img, (monitor['x'] - screen['x'], monitor['y'] - screen['y']))
-                        # print(idx, monitor['x'], monitor['y'])
-                        app_json['accepts'].append(img_name)
+                        app_json['accepted'].append(img_name)
                         raise ImageSuccess
                     except MonitorImageRejectedError:
-                        app_json[mon_rejects].append(img_name)
+                        app_json[mon_rejected].append(img_name)
                     except ImageRejectedError:
-                        app_json['rejects'].append(img_name)
+                        app_json['rejected'].append(img_name)
                 after = sub_json['data']['after']
                 fetch_json()
         except ImageSuccess:
@@ -132,7 +159,6 @@ def load_wallpaper(monitors, screen):
     wallpaper.save(wallpaper_path)
 
     set_wallpaper(wallpaper_path)
-    # print(datetime.datetime.now(), "loaded")
     return True
 
 
@@ -160,10 +186,6 @@ def set_wallpaper(wallpaper_path):
 
 def get_monitor_info():
     screen = get_screen_info()
-
-    PROCESS_PER_MONITOR_DPI_AWARE = 0x2
-    ahk.execute('DllCall("Shcore.dll\SetProcessDpiAwareness", Int, {})'.format(PROCESS_PER_MONITOR_DPI_AWARE))
-
     monitors = OrderedDict()
     for idx in range(1, screen['num'] + 1):
         monitors[idx] = {}
@@ -174,7 +196,6 @@ def get_monitor_info():
         monitors[idx]['y'] = t
         monitors[idx]['w'] = r - l
         monitors[idx]['h'] = b - t
-    print(monitors)
     return monitors, screen
 
 
@@ -213,7 +234,7 @@ def get_img(img_json, monitor):
     if m is None:
         m = re.search(dimension_re, title)
 
-    if m is not None:
+    if m:
         # can't tell for certain before downloading whether dimensions are given as WxH or HxW
         w = int(m.group('w'))
         h = int(m.group('h'))
@@ -256,4 +277,5 @@ def fetch_img(img_url):
 
 if __name__ == '__main__':
     ahk = AutoHotkey()
+    init()
     main()
