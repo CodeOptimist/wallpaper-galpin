@@ -9,73 +9,74 @@ from comtypes.client import CreateObject
 
 
 sub = 'earthporn'
-url = "http://www.reddit.com/r/{}/top.json?t=week&limit=100".format(sub)
 after = ""
-required_fit_percent = 0.00
-app_dir = os.path.join(os.getenv('APPDATA'), 'wallpaper-galpin', sub)
-tmp_dir = os.path.join(tempfile.gettempdir(), 'wallpaper-galpin', sub)
+min_fit = 0.00
+match_orientation = True
+update_interval_m = 60
+scale_update_interval_with_monitor_count = True
+app_dir = os.path.join(os.getenv('APPDATA'), 'wallpaper-galpin')
+tmp_dir = os.path.join(tempfile.gettempdir(), 'wallpaper-galpin')
+seen_json_path = os.path.join(app_dir, 'seen.json')
+seen_json = None
 sub_json_path = os.path.join(app_dir, sub + '.json')
 sub_json = None
-app_json_path = os.path.join(app_dir, sub + '-local.json')
-app_json = None
-last_updated_at = datetime.min
+URL = "http://www.reddit.com/r/{}/top.json?t=week&limit=100".format(sub)
+MAX_SEEN = 100 * 7
 
 
 def init():
-    global app_json, sub_json, last_updated_at
+    global seen_json, sub_json
     try:
         os.makedirs(app_dir)
         os.makedirs(tmp_dir)
     except FileExistsError:
         pass
 
-    app_json_defaults = {'last_updated': 0, 'accepted': [], 'rejected': []}
+    seen_json_defaults = {'accepted': [], 'rejected': []}
     try:
-        with open(app_json_path, 'r') as f:
-            app_json = json.load(f)
+        with open(seen_json_path, 'r') as f:
+            seen_json = json.load(f)
     except FileNotFoundError:
-        app_json = app_json_defaults
-    for k, v in app_json_defaults.items():
-        if k not in app_json:
-            app_json[k] = v
-
-    try:
-        with open(sub_json_path, 'r') as f:
-            sub_json = json.load(f)
-    except FileNotFoundError:
-        pass
+        seen_json = seen_json_defaults
+    for k, v in seen_json_defaults.items():
+        if k not in seen_json:
+            seen_json[k] = v
 
     PROCESS_PER_MONITOR_DPI_AWARE = 0x2
     ahk.execute('DllCall("Shcore.dll\SetProcessDpiAwareness", Int, {})'.format(PROCESS_PER_MONITOR_DPI_AWARE))
 
 
 def main():
-    global app_json, after
+    global seen_json, after
 
+    print("For proper status messages don't resize this window.")
     just_ran = True
     while True:
         monitors, screen = get_monitor_info()
-        update_every_m = 60 * len(monitors)
+        update_every_m = update_interval_m * (len(monitors) if scale_update_interval_with_monitor_count else 1)
         print("Monitors: '{}' Update frequency: '{}'".format(len(monitors), str(timedelta(minutes=update_every_m))[:-3].zfill(5)), end='\r', flush=True)
 
         clock_interval_m = math.gcd(update_every_m, 60)
         update_due_at = get_last_updated_at(clock_interval_m) + timedelta(minutes=update_every_m)
         is_update_due = datetime.now(pytz.utc) > update_due_at
         on_the_mark = datetime.now(pytz.utc).time().minute % clock_interval_m == 0
-        is_machine_idle = ahk.f('A_TimeIdlePhysical') / 1000 / 60 >= update_every_m
-        if is_update_due and (just_ran or on_the_mark and not is_machine_idle):
+        been_idle = ahk.f('A_TimeIdlePhysical') / 1000 / 60 >= update_every_m
+        if is_update_due and (just_ran or on_the_mark and not been_idle):
             just_ran = False
             print()
             fetch_json()
             old_tmp = list(glob.glob(os.path.join(tmp_dir, '*.*'), recursive=False))
             if load_wallpaper(monitors, screen):
                 after = ""
-                app_json['last_updated'] = datetime.now(pytz.utc).timestamp()
-            with open(app_json_path, 'w') as f:
-                json.dump(app_json, f, indent=4)
+            with open(seen_json_path, 'w') as f:
+                for k, v in seen_json.items():
+                    seen_json[k] = v[-MAX_SEEN:]
+                json.dump(seen_json, f, indent=4)
             for entry in old_tmp:
-                if os.path.isfile(entry):
+                try:
                     os.remove(entry)
+                except OSError:
+                    pass
         else:
             # noinspection PyTypeChecker
             update_in = update_due_at - datetime.now(pytz.utc) + timedelta(minutes=1)
@@ -90,7 +91,11 @@ def main():
 
 
 def get_last_updated_at(clock_interval_m):
-    dt = datetime.utcfromtimestamp(app_json['last_updated']).replace(tzinfo=pytz.utc)
+    try:
+        timestamp = os.path.getmtime(sub_json_path)
+    except OSError:
+        timestamp = 0
+    dt = datetime.utcfromtimestamp(timestamp).replace(tzinfo=pytz.utc)
     dt_rounded = round_time(dt, timedelta(minutes=clock_interval_m))
     return dt_rounded
 
@@ -107,7 +112,7 @@ def round_time(dt, round_to, func=math.floor):
 
 def fetch_json():
     global sub_json
-    json_url = "{}&after={}".format(url, after)
+    json_url = "{}&after={}".format(URL, after)
     print(datetime.now(), "fetching", json_url)
     try:
         response = requests.get(json_url, headers={'User-Agent': 'Python 3.6.1 (Windows NT 10.0):wallpaper-galpin:v2.0 (by /u/CodeOptimist)'}, timeout=5)
@@ -124,15 +129,15 @@ def load_wallpaper(monitors, screen):
     global after
     wallpaper = Image.new("RGB", (screen['w'], screen['h']))
     for idx, monitor in monitors.items():
-        mon_rejected = 'rejected_{}_{}'.format(monitor['w'], monitor['h'])
-        if mon_rejected not in app_json:
-            app_json[mon_rejected] = []
+        rejected_wh = 'rejected_{}_{}'.format(monitor['w'], monitor['h'])
+        if rejected_wh not in seen_json:
+            seen_json[rejected_wh] = []
 
         try:
             for _json_attempt_idx in range(2):
                 for img_json in sub_json['data']['children']:
                     img_name = os.path.basename(img_json['data']['url'])
-                    already_seen = any(img_name in app_json[k] for k in ('accepted', 'rejected', mon_rejected))
+                    already_seen = any(img_name in seen_json[k] for k in ('accepted', 'rejected', rejected_wh))
                     if already_seen:
                         continue
 
@@ -143,12 +148,12 @@ def load_wallpaper(monitors, screen):
                         fit_img.save(os.path.join(tmp_dir, name + '_fit' + '.png'))
                         print(datetime.now(), "found", idx, os.path.basename(img_path), img_json['data']['title'])
                         wallpaper.paste(fit_img, (monitor['x'] - screen['x'], monitor['y'] - screen['y']))
-                        app_json['accepted'].append(img_name)
+                        seen_json['accepted'].append(img_name)
                         raise ImageSuccess
                     except MonitorImageRejectedError:
-                        app_json[mon_rejected].append(img_name)
+                        seen_json[rejected_wh].append(img_name)
                     except ImageRejectedError:
-                        app_json['rejected'].append(img_name)
+                        seen_json['rejected'].append(img_name)
                 after = sub_json['data']['after']
                 fetch_json()
         except ImageSuccess:
@@ -163,8 +168,9 @@ def load_wallpaper(monitors, screen):
 
 
 def set_wallpaper(wallpaper_path):
-    # # doesn't work due to limitation of calling AutoHotkey.dll from Python (uses SendMessage/PostMessage):
+    # # doesn't work due to limitation of calling AutoHotkey.dll (uses SendMessage/PostMessage):
     # # "An outgoing call cannot be made since the application is dispatching an input-synchronous call."
+    # # Anyone have a solution?
     # ahk.execute("""
     #     ptr := ComObjCreate("{C2CF3110-460E-4fc1-B9D0-8A1C0C9CC4BD}", "{B92B56A9-8B55-4E14-9A89-0199BBB6F93B}")
     #     vTbl := NumGet(ptr + 0, 0, "Ptr")
@@ -252,14 +258,17 @@ def get_img(img_json, monitor):
         raise MonitorImageRejectedError
 
     is_oriented_same = (monitor['w'] / monitor['h'] >= 1) == (w / h >= 1)
+    if match_orientation and not is_oriented_same:
+        raise MonitorImageRejectedError
 
     img_ar = w / h
     mon_ar = monitor['w'] / monitor['h']
     fit_percent = (mon_ar * h) / w if img_ar >= mon_ar else (w / mon_ar) / h
-    is_fit = fit_percent >= required_fit_percent
 
-    if not is_oriented_same or not is_fit:
+    is_fit = fit_percent >= min_fit
+    if not is_fit:
         raise MonitorImageRejectedError
+
     return img, img_path
 
 
