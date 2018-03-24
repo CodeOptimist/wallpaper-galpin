@@ -2,7 +2,5 @@ syntax: glob
 __pycache__/
 .idea/
 venv/
-AutoHotkey.dll
-msvcr100.dll
 .dropbox
 run.cmd

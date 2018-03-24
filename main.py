@@ -1,3 +1,4 @@
+# Copyright (C) 2018  Christopher S. Galpin.  See /NOTICE.
 import requests, json, os, re, math, glob, tempfile, pytz, tzlocal, time
 import PIL.ImageOps
 from PIL import Image

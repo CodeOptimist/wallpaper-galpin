@@ -1,8 +1,6 @@
+# Copyright (C) 2018  Christopher S. Galpin.  See /NOTICE.
 import ctypes, time
 
-# download to folder (not included due to incompatible license):
-# https://github.com/HotKeyIt/ahkdll-v1-release/raw/master/Win32w/AutoHotkey.dll
-# https://github.com/HotKeyIt/ahkdll-v1-release/raw/master/Win32w/msvcr100.dll
 
 class AutoHotkey(object):
     def __init__(self):
