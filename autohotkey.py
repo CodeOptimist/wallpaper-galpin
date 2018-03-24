@@ -1,33 +1,49 @@
 # Copyright (C) 2018  Christopher S. Galpin.  See /NOTICE.
-import ctypes, time
+import ctypes, time, re
 
 
 class AutoHotkey(object):
-    def __init__(self):
-        self.ahk = ctypes.cdll.LoadLibrary('AutoHotkey.dll')
-        self.ahk.ahktextdll(None, None, None)
-        while not self.ahk.ahkReady():
+    def __init__(self, script="#Persistent\n#NoTrayIcon"):
+        self._ahk = ctypes.cdll.LoadLibrary(r'lib\AutoHotkey\AutoHotkey.dll')
+        self._ahk.ahkTextDll(script, None, None)
+        while not self._ahk.ahkReady():
             time.sleep(0.01)
 
-    def _get(self, name, is_pointer=False):
-        self.ahk.ahkgetvar.restype = ctypes.c_int64
-        result = self.ahk.ahkgetvar(name, 0)
+    def _get(self, name):
+        self._ahk.ahkGetVar.restype = ctypes.c_int64
+        result = self._ahk.ahkGetVar(name, 0)
         result = ctypes.cast(int(result), ctypes.c_wchar_p)
-        if is_pointer:
-            return result
-        return result.value
-
-    def get(self, name, is_pointer=False):
-        result = self._get(name, is_pointer)
+        result = result.value
         if result is not None:
             if result.startswith('0x') or result.isdigit():
                 result = int(result, 0)
         return result
 
-    def execute(self, str):
-        return self.ahk.ahkExec(str)
+    def get(self, name):
+        if not name:
+            raise ValueError("Variable name wasn't provided")
+        if len(name) > 253:
+            raise ValueError("Variable name length must be <= 253")
+        if not re.fullmatch(r'[\d\w#@$]+', name):
+            raise ValueError("Variable names may only consist of letters, numbers and the following punctuation: # _ @ $")
 
-    def f(self, str):
-        self.execute('result := ' + str)
-        result = self.get('result')
-        return result
+        # the following causes a heap corruption:
+        # ahkExec('result = abc')
+        # ahkExec('result = 1234')
+        # ahkGetVar('result', 0)
+        # ahkGetVar('result', 0)
+        # where the second assignment is a number (be it "1234" or 1234) of a longer length than the first assignment
+
+        # we can work around it by copying to a fresh variable before retrieving
+        self._ahk.ahkExec('__get =') # clear variable or bug can still occur from previous use
+        # '= %var%' vs. ':= var' to help enforce a variable name instead of arbitrary code
+        self._ahk.ahkExec('__get = %{}%'.format(name))
+        return self._get('__get')
+
+    def execute(self, script):
+        return self._ahk.ahkExec(script)
+
+    def f(self, script):
+        self._ahk.ahkExec('__f =')
+        self._ahk.ahkExec('__f := ' + script)
+        return self._get('__f')
