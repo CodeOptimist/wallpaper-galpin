@@ -1,133 +1,249 @@
 # Copyright (C) 2018  Christopher S. Galpin.  See /NOTICE.
-import requests, json, os, re, math, glob, tempfile, pytz, tzlocal, time
-import PIL.ImageOps
-from PIL import Image
+import json, os, re, glob, tempfile, time, platform, sys
+from json import JSONDecodeError
 from collections import OrderedDict
 from datetime import datetime, timedelta
-from autohotkey import AutoHotkey
-from gen.ShObjIdl_core import IDesktopWallpaper, DWPOS_SPAN
+
+import requests, pytz, tzlocal, click
+from _ctypes import COMError
+import PIL.ImageOps
+from PIL import Image
 from comtypes.client import CreateObject
 
+from autohotkey import AutoHotkey
+from gen.ShObjIdl_core import IDesktopWallpaper, DWPOS_SPAN
 
-sub = 'earthporn'
-after = ""
-min_fit = 0.00
-match_orientation = True
-update_interval_m = 60
-scale_update_interval_with_monitor_count = True
-app_dir = os.path.join(os.getenv('APPDATA'), 'wallpaper-galpin')
-tmp_dir = os.path.join(tempfile.gettempdir(), 'wallpaper-galpin')
-seen_json_path = os.path.join(app_dir, 'seen.json')
+
+# change this if you've forked the project, at the very least so the User-Agent is different
+NAME = 'wallpaper-galpin'
+APP_DIR = os.path.join(os.getenv('APPDATA'), NAME)
+TMP_DIR = os.path.join(tempfile.gettempdir(), NAME)
+SEEN_JSON_PATH = os.path.join(APP_DIR, 'seen.json')
+MAX_SEEN = 1000  # about how many images the most popular sees in a week
+MAX_PAGE_COUNT = 3
+FETCH_RETRY_COUNT = 3
+FETCH_RETRY_DELAY_S = 60
+
+
+def get_version():
+    if not getattr(sys, 'frozen', False):
+        return 'dev-{}'.format(int(os.path.getmtime(__file__)))
+
+    # noinspection PyUnresolvedReferences
+    version_path = os.path.join(sys._MEIPASS, 'version')
+    with open(version_path, 'r') as f:
+        version = f.readline()
+    return version
+
+
+version = get_version()
+has_lf = True
+argv = None
+ahk = None
 seen_json = None
-sub_json_path = os.path.join(app_dir, sub + '.json')
-sub_json = None
-URL = "http://www.reddit.com/r/{}/top.json?t=week&limit=100".format(sub)
-MAX_SEEN = 100 * 7
+wallpaper_path = None
+
+
+@click.command(name=NAME, context_settings={'terminal_width': 100})
+@click.argument('subreddit', default='earthporn')
+@click.option('--daemon/--no-daemon', default=True, show_default=True,
+              help="Keeps program running to update on an automated schedule."
+                   " Otherwise exits immediately after applying a due update. (--FORCE will always update.)")
+@click.option('--hours', default=1, show_default=True,
+              help="Update interval in hours.")
+@click.option('--scale-hours/--no-scale-hours', default=True, show_default=True,
+              help="Scale --HOURS with connected monitor count, e.g. every 2 hours when 2 monitors."
+                   " Useful as you may quickly exhaust all weekly photos from the subreddit otherwise.")
+@click.option('--force/--no-force', default=False, show_default=True,
+              help="Force an immediate update, regardless of whether it's due. Then proceeds as scheduled.")
+@click.option('--min-fit', default=0.0, show_default=True,
+              help="Minimum coverage of original image required after fitting to monitor, e.g. 0.5 for 50%. Might use to exclude panoramas, etc."
+                   " Generally unnecessary with the default --ORIENT option as same-oriented panoramas look quite good cropped to center.")
+@click.option('--orient/--no-orient', default=True, show_default=True,
+              help="Require an image to have the same orientation as monitor."
+                   " Although sufficiently large images will fit without this, excessive cropping is often unaesthetic (you can limit with --MIN-FIT)."
+                   " --NO-ORIENT may be useful if your subreddit lacks sufficient images of the same orientation.")
+@click.option('--forget-accepted', default=False, is_flag=True, show_default=True,
+              help="Wipe memory of accepted images so they may reappear (if still in the top weekly).")
+@click.option('--forget-rejected', default=False, is_flag=True, show_default=True,
+              help="Wipe memory of rejected images so they may be reevaluated against new --MIN-FIT or --ORIENT parameters."
+                   " This isn't necessary for monitor resolution changes.")
+@click.option('--use-saved/--no-use-saved', default=True, show_default=True,
+              help="Immediately applies the previously saved subreddit wallpaper (may be the same) before proceeding as normal.")
+@click.version_option(version=version)
+def cli(**kwargs):
+    """Updates each monitor with wallpaper from SUBREDDIT [default: earthporn] top weekly.
+
+SFWPornNetwork
+https://www.reddit.com/r/sfwpornnetwork/wiki/network
+"""
+    global argv
+    argv = kwargs
+    init()
+    main()
 
 
 def init():
-    global seen_json, sub_json
-    try:
-        os.makedirs(app_dir)
-        os.makedirs(tmp_dir)
-    except FileExistsError:
-        pass
+    global ahk, seen_json, wallpaper_path
+    wallpaper_path = os.path.join(APP_DIR, 'wallpaper-' + argv['subreddit'] + '.png')
+    ahk = AutoHotkey()
 
-    seen_json_defaults = {'accepted': [], 'rejected': []}
-    try:
-        with open(seen_json_path, 'r') as f:
-            seen_json = json.load(f)
-    except FileNotFoundError:
-        seen_json = seen_json_defaults
-    for k, v in seen_json_defaults.items():
-        if k not in seen_json:
-            seen_json[k] = v
+    try: os.makedirs(APP_DIR)
+    except FileExistsError: pass
+    try: os.makedirs(TMP_DIR)
+    except FileExistsError: pass
+
+    load_seen()
 
     PROCESS_PER_MONITOR_DPI_AWARE = 0x2
     ahk.execute('DllCall("Shcore.dll\SetProcessDpiAwareness", Int, {})'.format(PROCESS_PER_MONITOR_DPI_AWARE))
 
 
-def main():
-    global seen_json, after
+def load_seen():
+    global seen_json
+    seen_json_defaults = {'accepted': [], 'rejected': []}
+    try:
+        with open(SEEN_JSON_PATH, 'r+') as f:
+            seen_json = json.load(f)
 
-    print("For proper status messages don't resize this window.")
+            if argv['forget_accepted'] or argv['forget_rejected']:
+                if argv['forget_accepted']:
+                    seen_json['accepted'].clear()
+                if argv['forget_rejected']:
+                    # all of 'rejected_N' but not 'rejected'
+                    seen_json = {k: v for k, v in seen_json.items() if not k.startswith('rejected_')}
+                f.seek(0)
+                f.truncate()
+                json.dump(seen_json, f)
+    except JSONDecodeError:
+        log("Couldn't decode 'seen images' file: '{}'. Using blank. Will be overwritten on update.".format(SEEN_JSON_PATH))
+        seen_json = seen_json_defaults
+    except FileNotFoundError:
+        seen_json = seen_json_defaults
+
+    for k, v in seen_json_defaults.items():
+        if k not in seen_json:
+            seen_json[k] = v
+
+
+def log(*args):
+    global has_lf
+    if not has_lf:
+        print()
+    print('\t', *args)
+    has_lf = True
+
+
+def main():
+    print("For proper status messages don't resize this window. Leave running for scheduled updates.")
+    last_interval_at = datetime.min.replace(tzinfo=pytz.utc) if argv['force'] else get_file_modified_at(SEEN_JSON_PATH)
     just_ran = True
+
     while True:
         monitors, screen = get_monitor_info()
-        update_every_m = update_interval_m * (len(monitors) if scale_update_interval_with_monitor_count else 1)
-        print("Monitors: '{}' Update frequency: '{}'".format(len(monitors), str(timedelta(minutes=update_every_m))[:-3].zfill(5)), end='\r', flush=True)
+        update_every_m = argv['hours'] * 60 * (len(monitors) if argv['scale_hours'] else 1)
+        print_status(monitors, update_every_m)
 
-        clock_interval_m = math.gcd(update_every_m, 60)
-        update_due_at = get_last_updated_at(clock_interval_m) + timedelta(minutes=update_every_m)
+        update_due_at = last_interval_at + timedelta(minutes=update_every_m)
         is_update_due = datetime.now(pytz.utc) > update_due_at
-        on_the_mark = datetime.now(pytz.utc).time().minute % clock_interval_m == 0
-        been_idle = ahk.f('A_TimeIdlePhysical') / 1000 / 60 >= update_every_m
-        if is_update_due and (just_ran or on_the_mark and not been_idle):
-            just_ran = False
-            print()
-            fetch_json()
-            old_tmp = list(glob.glob(os.path.join(tmp_dir, '*.*'), recursive=False))
-            if load_wallpaper(monitors, screen):
-                after = ""
-            with open(seen_json_path, 'w') as f:
-                for k, v in seen_json.items():
-                    seen_json[k] = v[-MAX_SEEN:]
-                json.dump(seen_json, f, indent=4)
-            for entry in old_tmp:
-                try:
-                    os.remove(entry)
-                except OSError:
-                    pass
+        idle_s = ahk.f('A_TimeIdlePhysical') / 1000
+
+        if is_update_due and (just_ran or idle_s <= 60):
+            update_wallpaper(monitors, screen)
+            last_interval_at = datetime.now(pytz.utc).replace(second=0, microsecond=0)
         else:
-            # noinspection PyTypeChecker
-            update_in = update_due_at - datetime.now(pytz.utc) + timedelta(minutes=1)
-            update_in -= timedelta(microseconds=update_in.microseconds)
-            print("Monitors: '{}' Update frequency: '{}' Next update in: '{}' at: '{}'".format(
-                len(monitors),
-                str(timedelta(minutes=update_every_m))[:-3].zfill(5),
-                str(update_in)[:-3].zfill(5),
-                update_due_at.astimezone(tzlocal.get_localzone()),
-            ), end='\r', flush=True)
-        time.sleep(30)
+            if just_ran and argv['use_saved'] and os.path.isfile(wallpaper_path):
+                set_wallpaper(wallpaper_path)
+
+            if not argv['daemon']:
+                log("exiting")
+                sys.exit()
+
+            print_status(monitors, update_every_m, update_due_at)
+            time.sleep(30)
+
+        just_ran = False
 
 
-def get_last_updated_at(clock_interval_m):
+def update_wallpaper(monitors, screen):
+    global seen_json
+
+    old_tmp = list(glob.glob(os.path.join(TMP_DIR, '*.*'), recursive=False))
+    old_accepted = seen_json['accepted'].copy()
+
+    wallpaper = None
     try:
-        timestamp = os.path.getmtime(sub_json_path)
+        wallpaper = get_wallpaper(monitors, screen)
+    except OutpacedError:
+        log("Suitable image not found within {} pages. Skipping update."
+            " Updates have outpaced the subreddit, you may need a longer time (--HOURS) or relaxed image requirements.".format(MAX_PAGE_COUNT))
+
+    if wallpaper:
+        wallpaper.save(wallpaper_path)
+        set_wallpaper(wallpaper_path)
+        log("stitching wallpaper")
+    else:
+        seen_json['accepted'] = old_accepted
+
+    with open(SEEN_JSON_PATH, 'w') as f:
+        json.dump(seen_json, f)
+
+    for entry in old_tmp:
+        try:
+            os.remove(entry)
+        except OSError:
+            pass
+
+
+def print_status(monitors, update_every_m, update_due_at=None):
+    global has_lf
+    status = "* Monitors: '{}' Update frequency: '{}'".format(len(monitors), str(timedelta(minutes=update_every_m))[:-3].zfill(5))
+
+    if update_due_at:
+        update_in = update_due_at - datetime.now(pytz.utc) + timedelta(minutes=1)
+        update_in -= timedelta(microseconds=update_in.microseconds)
+        status += " Next update in: '{}' at: '{}'".format('Idle' if update_in < timedelta(0) else str(update_in)[:-3].zfill(5), update_due_at.astimezone(tzlocal.get_localzone()))
+
+    status += ' ' * (119 - len(status))
+    print(status, end='\r', flush=True)
+    has_lf = False
+
+
+def get_file_modified_at(path):
+    try:
+        timestamp = os.path.getmtime(path)
     except OSError:
         timestamp = 0
-    dt = datetime.utcfromtimestamp(timestamp).replace(tzinfo=pytz.utc)
-    dt_rounded = round_time(dt, timedelta(minutes=clock_interval_m))
-    return dt_rounded
-
-
-def round_time(dt, round_to, func=math.floor):
-    dt = dt.replace(microsecond=0)
-    s = (dt - dt.replace(hour=0, minute=0, second=0)).total_seconds()
-    round_s = round_to.total_seconds()
-    rounded_s = func((s + round_s / 2) / round_s) * round_s
-    diff = timedelta(seconds=rounded_s - s)
-    result = dt + diff
+    result = datetime.utcfromtimestamp(timestamp).replace(second=0, microsecond=0, tzinfo=pytz.utc)
     return result
 
 
-def fetch_json():
-    global sub_json
-    json_url = "{}&after={}".format(URL, after)
-    print(datetime.now(), "fetching", json_url)
-    try:
-        response = requests.get(json_url, headers={'User-Agent': 'Python 3.6.1 (Windows NT 10.0):wallpaper-galpin:v2.0 (by /u/CodeOptimist)'}, timeout=5)
-        sub_json = response.json()
-    except Exception:
-        time.sleep(60 * 3)
-        return False
-    with open(sub_json_path, 'w') as f:
-        json.dump(sub_json, f)
-    return True
+def fetch_json(after):
+    json_url = "http://www.reddit.com/r/{}/top.json?t=week&limit=100&after={}".format(argv['subreddit'], after)
+    log("fetching", json_url)
+
+    for fetch_attempt_num in range(1, FETCH_RETRY_COUNT + 1):
+        try:
+            response = requests.get(json_url, headers={
+                'User-Agent': "{} ({}):{}:{} (by /u/CodeOptimist)".format(sys.version, platform.platform(), NAME, version)
+            }, timeout=30)
+
+            sub_json = response.json()
+
+            if not sub_json['data']['children']:
+                raise ValueError("'{}' doesn't appear to be a valid subreddit".format(argv['subreddit']))
+
+            return sub_json
+        except (ConnectionError, TimeoutError):
+            if fetch_attempt_num == FETCH_RETRY_COUNT:
+                raise
+            time.sleep(FETCH_RETRY_DELAY_S)
 
 
-def load_wallpaper(monitors, screen):
-    global after
+def get_wallpaper(monitors, screen):
+    global seen_json
+    sub_json = fetch_json(after="")  # fetch #1
+
     wallpaper = Image.new("RGB", (screen['w'], screen['h']))
     for idx, monitor in monitors.items():
         rejected_wh = 'rejected_{}_{}'.format(monitor['w'], monitor['h'])
@@ -135,7 +251,7 @@ def load_wallpaper(monitors, screen):
             seen_json[rejected_wh] = []
 
         try:
-            for _json_attempt_idx in range(2):
+            for _page_fetch_num in range(2, MAX_PAGE_COUNT + 1):
                 for img_json in sub_json['data']['children']:
                     img_name = os.path.basename(img_json['data']['url'])
                     already_seen = any(img_name in seen_json[k] for k in ('accepted', 'rejected', rejected_wh))
@@ -143,32 +259,42 @@ def load_wallpaper(monitors, screen):
                         continue
 
                     try:
-                        img, img_path = get_img(img_json, monitor)
-                        fit_img = PIL.ImageOps.fit(img, (monitor['w'], monitor['h']), PIL.Image.LANCZOS)
-                        name, ext = os.path.splitext(os.path.basename(img_path))
-                        fit_img.save(os.path.join(tmp_dir, name + '_fit' + '.png'))
-                        print(datetime.now(), "found", idx, os.path.basename(img_path), img_json['data']['title'])
-                        wallpaper.paste(fit_img, (monitor['x'] - screen['x'], monitor['y'] - screen['y']))
-                        seen_json['accepted'].append(img_name)
+                        stitch_wallpaper(img_json, wallpaper, monitor, screen)
+                        log(idx, '"{}"'.format(img_json['data']['title']))
+                        seen_append('accepted', img_name)
                         raise ImageSuccess
                     except MonitorImageRejectedError:
-                        seen_json[rejected_wh].append(img_name)
+                        seen_append(rejected_wh, img_name)
                     except ImageRejectedError:
-                        seen_json['rejected'].append(img_name)
-                after = sub_json['data']['after']
-                fetch_json()
+                        seen_append('rejected', img_name)
+
+                sub_json = fetch_json(sub_json['data']['after'])
+
+            raise OutpacedError
+
         except ImageSuccess:
             continue
-        return False
 
-    wallpaper_path = os.path.join(app_dir, 'wallpaper.png')
-    wallpaper.save(wallpaper_path)
-
-    set_wallpaper(wallpaper_path)
-    return True
+    return wallpaper
 
 
-def set_wallpaper(wallpaper_path):
+# can't natively json encode a deque, so we'll use this
+def seen_append(name, item):
+    lst = seen_json[name]
+    if len(lst) == MAX_SEEN:
+        lst.pop(0)
+    lst.append(item)
+
+
+def stitch_wallpaper(img_json, wallpaper, monitor, screen):
+    img, img_path = get_img(img_json, monitor)
+    fit_img = PIL.ImageOps.fit(img, (monitor['w'], monitor['h']), PIL.Image.LANCZOS)
+    name, ext = os.path.splitext(os.path.basename(img_path))
+    fit_img.save(os.path.join(TMP_DIR, name + '_fit' + '.png'))
+    wallpaper.paste(fit_img, (monitor['x'] - screen['x'], monitor['y'] - screen['y']))
+
+
+def set_wallpaper(path):
     # # doesn't work due to limitation of calling AutoHotkey.dll (uses SendMessage/PostMessage):
     # # "An outgoing call cannot be made since the application is dispatching an input-synchronous call."
     # # Anyone have a solution?
@@ -186,7 +312,10 @@ def set_wallpaper(wallpaper_path):
     # """)
 
     com_obj = CreateObject('{C2CF3110-460E-4fc1-B9D0-8A1C0C9CC4BD}', interface=IDesktopWallpaper)
-    com_obj.SetWallpaper(None, wallpaper_path)
+    try:
+        com_obj.SetWallpaper(None, path)
+    except COMError as e:
+        log(repr(e))
     com_obj.SetPosition(DWPOS_SPAN)
     com_obj.Release()
 
@@ -196,7 +325,7 @@ def get_monitor_info():
     monitors = OrderedDict()
     for idx in range(1, screen['num'] + 1):
         monitors[idx] = {}
-        ahk.execute(r'SysGet, mon{0}, Monitor, {0}'.format(idx))
+        ahk.execute('SysGet, mon{0}, Monitor, {0}'.format(idx))
         l, t, r, b = [int(ahk.get('mon{}{}'.format(idx, side))) for side in ("Left", "Top", "Right", "Bottom")]
 
         monitors[idx]['x'] = l
@@ -210,7 +339,7 @@ def get_screen_info():
     result = {}
     SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_CMONITORS = (76, 77, 78, 79, 80)
     for c, n in zip(('x', 'y', 'w', 'h', 'num'), (SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_CMONITORS)):
-        ahk.execute(r'SysGet, result, {}'.format(n))
+        ahk.execute('SysGet, result, {}'.format(n))
         result[c] = int(ahk.get('result'))
     return result
 
@@ -227,11 +356,15 @@ class MonitorImageRejectedError(Exception):
     pass
 
 
+class OutpacedError(Exception):
+    pass
+
+
 def get_img(img_json, monitor):
     img_url = img_json['data']['url']
     if '//imgur.com/' in img_url:
         img_url = img_url.replace('//imgur.com/', '//i.imgur.com/') + '.jpg'
-    if not img_url.endswith(r'.jpg') and not img_url.endswith(r'.jpeg'):
+    if not img_url.endswith('.jpg') and not img_url.endswith('.jpeg'):
         raise ImageRejectedError
 
     title = img_json['data']['title']
@@ -251,7 +384,10 @@ def get_img(img_json, monitor):
             raise MonitorImageRejectedError
 
     img_path = fetch_img(img_url)
-    img = Image.open(img_path)
+    try:
+        img = Image.open(img_path)
+    except OSError:
+        raise ImageRejectedError
     img.load()  # immediately closes file
 
     w, h = img.size
@@ -259,14 +395,14 @@ def get_img(img_json, monitor):
         raise MonitorImageRejectedError
 
     is_oriented_same = (monitor['w'] / monitor['h'] >= 1) == (w / h >= 1)
-    if match_orientation and not is_oriented_same:
+    if argv['orient'] and not is_oriented_same:
         raise MonitorImageRejectedError
 
     img_ar = w / h
     mon_ar = monitor['w'] / monitor['h']
     fit_percent = (mon_ar * h) / w if img_ar >= mon_ar else (w / mon_ar) / h
 
-    is_fit = fit_percent >= min_fit
+    is_fit = fit_percent >= argv['min_fit']
     if not is_fit:
         raise MonitorImageRejectedError
 
@@ -275,17 +411,21 @@ def get_img(img_json, monitor):
 
 def fetch_img(img_url):
     img_name = os.path.basename(img_url)
-    img_path = os.path.join(tmp_dir, img_name)
-    if not os.path.isfile(img_path):
-        response = requests.get(img_url)
-        img_data = response.content
-        with open(img_path, "wb") as f:
-            f.write(img_data)
-        time.sleep(5)
-    return img_path
+    img_path = os.path.join(TMP_DIR, img_name)
+
+    for fetch_attempt_num in range(1, FETCH_RETRY_COUNT + 1):
+        try:
+            if not os.path.isfile(img_path):
+                response = requests.get(img_url, timeout=30)
+                img_data = response.content
+                with open(img_path, "wb") as f:
+                    f.write(img_data)
+            return img_path
+        except (ConnectionError, TimeoutError):
+            if fetch_attempt_num == FETCH_RETRY_COUNT:
+                raise
+            time.sleep(FETCH_RETRY_DELAY_S)
 
 
 if __name__ == '__main__':
-    ahk = AutoHotkey()
-    init()
-    main()
+    cli()

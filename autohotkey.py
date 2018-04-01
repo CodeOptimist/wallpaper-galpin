@@ -4,6 +4,7 @@ import ctypes, time, re
 
 class AutoHotkey(object):
     def __init__(self, script="#Persistent\n#NoTrayIcon"):
+        ctypes.cdll.LoadLibrary(r'lib\msvcr100.dll')
         self._ahk = ctypes.cdll.LoadLibrary(r'lib\AutoHotkey\AutoHotkey.dll')
         self._ahk.ahkTextDll(script, None, None)
         while not self._ahk.ahkReady():
