@@ -32,16 +32,12 @@ def get_version():
     # noinspection PyUnresolvedReferences
     version_path = os.path.join(sys._MEIPASS, 'version')
     with open(version_path, 'r') as f:
-        version = f.readline()
-    return version
+        result = f.readline()
+    return result
 
 
 version = get_version()
 has_lf = True
-argv = None
-ahk = None
-seen_json = None
-wallpaper_path = None
 
 
 @click.command(name=NAME, context_settings={'terminal_width': 100})
@@ -84,7 +80,7 @@ https://www.reddit.com/r/sfwpornnetwork/wiki/network
 
 
 def init():
-    global ahk, seen_json, wallpaper_path
+    global ahk, wallpaper_path
     wallpaper_path = os.path.join(APP_DIR, 'wallpaper-' + argv['subreddit'] + '.png')
     ahk = AutoHotkey()
 
@@ -134,23 +130,37 @@ def log(*args):
     has_lf = True
 
 
+def minute_dt(dt=None, local=False):
+    if dt is None:
+        dt = datetime.now(pytz.utc)
+    elif dt.tzinfo is None:
+        dt = dt.replace(tzinfo=pytz.utc)
+
+    dt = dt.replace(second=0, microsecond=0)
+    if local:
+        dt = dt.astimezone(tzlocal.get_localzone())
+    return dt
+
+
 def main():
+    global update_every_m
     print("For proper status messages don't resize this window. Leave running for scheduled updates.")
-    last_interval_at = datetime.min.replace(tzinfo=pytz.utc) if argv['force'] else get_file_modified_at(SEEN_JSON_PATH)
+    last_interval_at = minute_dt(datetime.min) if argv['force'] else get_file_modified_at(SEEN_JSON_PATH)
     just_ran = True
 
     while True:
-        monitors, screen = get_monitor_info()
+        update_monitor_info()
         update_every_m = argv['hours'] * 60 * (len(monitors) if argv['scale_hours'] else 1)
-        print_status(monitors, update_every_m)
+        print_status()
 
         update_due_at = last_interval_at + timedelta(minutes=update_every_m)
-        is_update_due = datetime.now(pytz.utc) > update_due_at
+        is_update_due = minute_dt() > update_due_at
         idle_s = ahk.f('A_TimeIdlePhysical') / 1000
 
         if is_update_due and (just_ran or idle_s <= 60):
-            update_wallpaper(monitors, screen)
-            last_interval_at = datetime.now(pytz.utc).replace(second=0, microsecond=0)
+            print_status("Update at '{}'".format(minute_dt(local=True)))
+            update_wallpaper()
+            last_interval_at = minute_dt()
         else:
             if just_ran and argv['use_saved'] and os.path.isfile(wallpaper_path):
                 set_wallpaper(wallpaper_path)
@@ -159,13 +169,14 @@ def main():
                 log("exiting")
                 sys.exit()
 
-            print_status(monitors, update_every_m, update_due_at)
+            update_in = update_due_at - minute_dt() + timedelta(minutes=1)
+            print_status("Next update in: '{}' at: '{}'".format('Idle' if update_in < timedelta(0) else str(update_in)[:-3].zfill(5), minute_dt(update_due_at, local=True)))
             time.sleep(30)
 
         just_ran = False
 
 
-def update_wallpaper(monitors, screen):
+def update_wallpaper():
     global seen_json
 
     old_tmp = list(glob.glob(os.path.join(TMP_DIR, '*.*'), recursive=False))
@@ -173,7 +184,7 @@ def update_wallpaper(monitors, screen):
 
     wallpaper = None
     try:
-        wallpaper = get_wallpaper(monitors, screen)
+        wallpaper = get_wallpaper()
     except OutpacedError:
         log("Suitable image not found within {} pages. Skipping update."
             " Updates have outpaced the subreddit, you may need a longer time (--HOURS) or relaxed image requirements.".format(MAX_PAGE_COUNT))
@@ -195,15 +206,10 @@ def update_wallpaper(monitors, screen):
             pass
 
 
-def print_status(monitors, update_every_m, update_due_at=None):
+def print_status(msg=""):
     global has_lf
     status = "* Monitors: '{}' Update frequency: '{}'".format(len(monitors), str(timedelta(minutes=update_every_m))[:-3].zfill(5))
-
-    if update_due_at:
-        update_in = update_due_at - datetime.now(pytz.utc) + timedelta(minutes=1)
-        update_in -= timedelta(microseconds=update_in.microseconds)
-        status += " Next update in: '{}' at: '{}'".format('Idle' if update_in < timedelta(0) else str(update_in)[:-3].zfill(5), update_due_at.astimezone(tzlocal.get_localzone()))
-
+    status += ' ' + msg
     status += ' ' * (119 - len(status))
     print(status, end='\r', flush=True)
     has_lf = False
@@ -214,7 +220,7 @@ def get_file_modified_at(path):
         timestamp = os.path.getmtime(path)
     except OSError:
         timestamp = 0
-    result = datetime.utcfromtimestamp(timestamp).replace(second=0, microsecond=0, tzinfo=pytz.utc)
+    result = minute_dt(datetime.utcfromtimestamp(timestamp))
     return result
 
 
@@ -240,7 +246,7 @@ def fetch_json(after):
             time.sleep(FETCH_RETRY_DELAY_S)
 
 
-def get_wallpaper(monitors, screen):
+def get_wallpaper():
     global seen_json
     sub_json = fetch_json(after="")  # fetch #1
 
@@ -259,7 +265,7 @@ def get_wallpaper(monitors, screen):
                         continue
 
                     try:
-                        stitch_wallpaper(img_json, wallpaper, monitor, screen)
+                        stitch_wallpaper(img_json, wallpaper, monitor)
                         log(idx, '"{}"'.format(img_json['data']['title']))
                         seen_append('accepted', img_name)
                         raise ImageSuccess
@@ -286,7 +292,7 @@ def seen_append(name, item):
     lst.append(item)
 
 
-def stitch_wallpaper(img_json, wallpaper, monitor, screen):
+def stitch_wallpaper(img_json, wallpaper, monitor):
     img, img_path = get_img(img_json, monitor)
     fit_img = PIL.ImageOps.fit(img, (monitor['w'], monitor['h']), PIL.Image.LANCZOS)
     name, ext = os.path.splitext(os.path.basename(img_path))
@@ -320,7 +326,8 @@ def set_wallpaper(path):
     com_obj.Release()
 
 
-def get_monitor_info():
+def update_monitor_info():
+    global screen, monitors
     screen = get_screen_info()
     monitors = OrderedDict()
     for idx in range(1, screen['num'] + 1):
@@ -332,7 +339,6 @@ def get_monitor_info():
         monitors[idx]['y'] = t
         monitors[idx]['w'] = r - l
         monitors[idx]['h'] = b - t
-    return monitors, screen
 
 
 def get_screen_info():
