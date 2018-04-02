@@ -157,8 +157,8 @@ def main():
         is_update_due = minute_dt() > update_due_at
         idle_s = ahk.f('A_TimeIdlePhysical') / 1000
 
-        if is_update_due and (just_ran or idle_s <= 60):
-            print_status("Update at '{}'".format(minute_dt(local=True)))
+        if is_update_due and not screen['is_remote'] and (just_ran or idle_s <= 60):
+            print_status("Update at: '{}'".format(minute_dt(local=True)))
             update_wallpaper()
             last_interval_at = minute_dt()
         else:
@@ -170,7 +170,10 @@ def main():
                 sys.exit()
 
             update_in = update_due_at - minute_dt() + timedelta(minutes=1)
-            print_status("Next update in: '{}' at: '{}'".format('Idle' if update_in < timedelta(0) else str(update_in)[:-3].zfill(5), minute_dt(update_due_at, local=True)))
+            print_status("Next update in: '{}' at: '{}'".format(
+                'Idle' if update_in < timedelta(0) else 'Remote' if screen['is_remote'] else str(update_in)[:-3].zfill(5),
+                minute_dt(update_due_at, local=True))
+            )
             time.sleep(30)
 
         just_ran = False
@@ -330,7 +333,7 @@ def update_monitor_info():
     global screen, monitors
     screen = get_screen_info()
     monitors = OrderedDict()
-    for idx in range(1, screen['num'] + 1):
+    for idx in range(1, screen['mon_count'] + 1):
         monitors[idx] = {}
         ahk.execute('SysGet, mon{0}, Monitor, {0}'.format(idx))
         l, t, r, b = [int(ahk.get('mon{}{}'.format(idx, side))) for side in ("Left", "Top", "Right", "Bottom")]
@@ -343,8 +346,8 @@ def update_monitor_info():
 
 def get_screen_info():
     result = {}
-    SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_CMONITORS = (76, 77, 78, 79, 80)
-    for c, n in zip(('x', 'y', 'w', 'h', 'num'), (SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_CMONITORS)):
+    SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_CMONITORS, SM_REMOTESESSION = (76, 77, 78, 79, 80, 4096)
+    for c, n in zip(('x', 'y', 'w', 'h', 'mon_count', 'is_remote'), (SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_CMONITORS, SM_REMOTESESSION)):
         ahk.execute('SysGet, result, {}'.format(n))
         result[c] = int(ahk.get('result'))
     return result
