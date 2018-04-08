@@ -1,5 +1,5 @@
 # Copyright (C) 2018  Christopher S. Galpin.  See /NOTICE.
-import json, os, re, glob, tempfile, time, platform, sys
+import json, os, re, glob, tempfile, time, platform, sys, html
 from json import JSONDecodeError
 from collections import OrderedDict
 from datetime import datetime, timedelta
@@ -45,10 +45,10 @@ has_lf = True
 @click.option('--daemon/--no-daemon', default=True, show_default=True,
               help="Keeps program running to update on an automated schedule."
                    " Otherwise exits immediately after applying a due update. (--FORCE will always update.)")
-@click.option('--hours', default=1, show_default=True,
-              help="Update interval in hours.")
-@click.option('--scale-hours/--no-scale-hours', default=True, show_default=True,
-              help="Scale --HOURS with connected monitor count, e.g. every 2 hours when 2 monitors."
+@click.option('--minutes', type=click.IntRange(min=15), default=60, show_default=True,
+              help="Update interval in minutes.")
+@click.option('--scale-minutes/--no-scale-minutes', default=True, show_default=True,
+              help="Scale --MINUTES with connected monitor count, e.g. every 2 hours when 2 monitors."
                    " Useful as you may quickly exhaust all weekly photos from the subreddit otherwise.")
 @click.option('--force/--no-force', default=False, show_default=True,
               help="Force an immediate update, regardless of whether it's due. Then proceeds as scheduled.")
@@ -126,7 +126,7 @@ def log(*args):
     global has_lf
     if not has_lf:
         print()
-    print('\t', *args)
+    print('\t' + ' '.join(str(arg) for arg in args))
     has_lf = True
 
 
@@ -150,7 +150,7 @@ def main():
 
     while True:
         update_monitor_info()
-        update_every_m = argv['hours'] * 60 * (len(monitors) if argv['scale_hours'] else 1)
+        update_every_m = argv['minutes'] * (len(monitors) if argv['scale_minutes'] else 1)
         print_status()
 
         update_due_at = last_interval_at + timedelta(minutes=update_every_m)
@@ -169,7 +169,7 @@ def main():
                 log("exiting")
                 sys.exit()
 
-            update_in = update_due_at - minute_dt() + timedelta(minutes=1)
+            update_in = update_due_at - minute_dt()
             print_status("Next update in: '{}' at: '{}'".format(
                 'Idle' if update_in < timedelta(0) else 'Remote' if screen['is_remote'] else str(update_in)[:-3].zfill(5),
                 minute_dt(update_due_at, local=True))
@@ -190,7 +190,7 @@ def update_wallpaper():
         wallpaper = get_wallpaper()
     except OutpacedError:
         log("Suitable image not found within {} pages. Skipping update."
-            " Updates have outpaced the subreddit, you may need a longer time (--HOURS) or relaxed image requirements.".format(MAX_PAGE_COUNT))
+            " Updates have outpaced the subreddit, you may need a longer time (--MINUTES) or relaxed image requirements.".format(MAX_PAGE_COUNT))
 
     if wallpaper:
         wallpaper.save(wallpaper_path)
@@ -269,7 +269,7 @@ def get_wallpaper():
 
                     try:
                         stitch_wallpaper(img_json, wallpaper, monitor)
-                        log(idx, '"{}"'.format(img_json['data']['title']))
+                        log(idx, '"{}"'.format(html.unescape(img_json['data']['title'])))
                         seen_append('accepted', img_name)
                         raise ImageSuccess
                     except MonitorImageRejectedError:
@@ -373,17 +373,23 @@ def get_img(img_json, monitor):
     img_url = img_json['data']['url']
     if '//imgur.com/' in img_url:
         img_url = img_url.replace('//imgur.com/', '//i.imgur.com/') + '.jpg'
-    if not img_url.endswith('.jpg') and not img_url.endswith('.jpeg'):
-        raise ImageRejectedError
+    if not img_url.lower().endswith('.jpg') and not img_url.lower().endswith('.jpeg'):
+        raise ImageRejectedError("image filename doesn't end with '.jpg' or '.jpeg'")
 
-    title = img_json['data']['title']
-    link_flair_text = img_json['data']['link_flair_text'] or ''
     dimension_re = r'[\[(]\s*(?P<w>\d+)\s*\D\s*(?P<h>\d+)[)\]]'
-    m = re.search(dimension_re, link_flair_text)
-    if m is None:
-        m = re.search(dimension_re, title)
+    dimension_pairs = []
 
+    m = re.search(dimension_re, img_json['data']['title'])
     if m:
+        dimension_pairs.append(m)
+    m = re.search(dimension_re, img_json['data']['link_flair_text'] or '')
+    if m:
+        dimension_pairs.append(m)
+
+    if not dimension_pairs:
+        raise ImageRejectedError("no dimensions given in title or flair")
+
+    for m in dimension_pairs:
         # can't tell for certain before downloading whether dimensions are given as WxH or HxW
         w = int(m.group('w'))
         h = int(m.group('h'))
