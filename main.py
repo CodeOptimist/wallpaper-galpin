@@ -205,8 +205,8 @@ def update_wallpaper():
         wallpaper, accepted = get_wallpaper()
         wallpaper.save(wallpaper_path)
         set_wallpaper(wallpaper_path)
-        for img_name in accepted:
-            seen_append('accepted', img_name)
+        for img_basename in accepted:
+            seen_append('accepted', img_basename)
         seen_json['last_accepted'] = accepted
         log("stitching wallpaper")
 
@@ -298,7 +298,7 @@ def assign_unique(dict_):
 
 
 def get_cycled_wallpaper():
-    img_paths = [os.path.join(TMP_DIR, img_name) for img_name in seen_json['last_accepted']]
+    img_paths = [os.path.join(TMP_DIR, img_basename) for img_basename in seen_json['last_accepted']]
     images, mon_candidate_dict = get_monitor_image_candidates(img_paths)
     mon_img_dict = assign_unique(mon_candidate_dict)
     if len(mon_img_dict) < len(monitors):
@@ -340,24 +340,23 @@ def get_wallpaper():
         try:
             for _page_fetch_num in range(2, MAX_PAGE_COUNT + 1):
                 for img_json in sub_json['data']['children']:
-                    img_json_name = os.path.basename(img_json['data']['url'])
-                    past_seen = any(img_json_name in seen_json[k] for k in ('accepted', 'rejected', rejected_wh))
-                    if past_seen or img_json_name in new_accepted:
+                    img_basename = os.path.basename(fix_url(img_json['data']['url']))
+                    past_seen = any(img_basename in seen_json[k] for k in ('accepted', 'rejected', rejected_wh))
+                    if past_seen or img_basename in new_accepted:
                         continue
 
                     try:
                         img_url = validate_img_json(img_json, monitor)
                         img_path = fetch_img(img_url)
-                        assert img_json_name == os.path.basename(img_path)
                         img = validate_img(img_path, monitor)
                         stitch_wallpaper(wallpaper, img, img_path, monitor)
                         log(idx, '"{}"'.format(html.unescape(img_json['data']['title'])))
-                        new_accepted.append(img_json_name)
+                        new_accepted.append(img_basename)
                         raise ImageSuccess
                     except MonitorImageRejectedError:
-                        seen_append(rejected_wh, img_json_name)
+                        seen_append(rejected_wh, img_basename)
                     except ImageRejectedError:
-                        seen_append('rejected', img_json_name)
+                        seen_append('rejected', img_basename)
 
                 sub_json = fetch_json(sub_json['data']['after'])
 
@@ -379,7 +378,7 @@ def seen_append(name, item):
 
 def stitch_wallpaper(wallpaper, img, img_path, monitor):
     fit_img = PIL.ImageOps.fit(img, (monitor['w'], monitor['h']), PIL.Image.LANCZOS)
-    name, ext = os.path.splitext(os.path.basename(img_path))
+    name, _ = os.path.splitext(os.path.basename(img_path))
     fit_name = '{}_fit_{}_{}.png'.format(name, monitor['w'], monitor['h'])
     fit_path = os.path.join(TMP_DIR, fit_name)
     if not os.path.isfile(fit_path):
@@ -454,10 +453,14 @@ class OutpacedError(Exception):
     pass
 
 
+def fix_url(url):
+    if '//imgur.com/' in url:
+        url = url.replace('//imgur.com/', '//i.imgur.com/') + '.jpg'
+    return url
+
+
 def validate_img_json(img_json, monitor):
-    img_url = img_json['data']['url']
-    if '//imgur.com/' in img_url:
-        img_url = img_url.replace('//imgur.com/', '//i.imgur.com/') + '.jpg'
+    img_url = fix_url(img_json['data']['url'])
     if not img_url.lower().endswith('.jpg') and not img_url.lower().endswith('.jpeg'):
         raise ImageRejectedError("image filename doesn't end with '.jpg' or '.jpeg'")
 
@@ -515,18 +518,17 @@ def validate_img(img_path, monitor):
     return img
 
 
-def fetch_img(img_url):
-    img_name = os.path.basename(img_url)
-    img_path = os.path.join(TMP_DIR, img_name)
-
+def fetch_img(url):
+    basename = os.path.basename(url)
+    path = os.path.join(TMP_DIR, basename)
     for fetch_attempt_num in range(1, FETCH_RETRY_COUNT + 1):
         try:
-            if not os.path.isfile(img_path):
-                response = requests.get(img_url, timeout=30)
+            if not os.path.isfile(path):
+                response = requests.get(url, timeout=30)
                 img_data = response.content
-                with open(img_path, "wb") as f:
+                with open(path, "wb") as f:
                     f.write(img_data)
-            return img_path
+            return path
         except (ConnectionError, TimeoutError):
             if fetch_attempt_num == FETCH_RETRY_COUNT:
                 raise
