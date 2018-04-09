@@ -152,8 +152,9 @@ def main():
     last_update_at = minute_dt(datetime.min) if argv['force'] else get_file_modified_at(SEEN_JSON_PATH)
     last_cycle_at = last_update_at
     cycle_minutes_td = timedelta(minutes=argv['cycle_minutes'])
-    while minute_dt() - last_cycle_at > cycle_minutes_td:
-        last_cycle_at += cycle_minutes_td
+    if not argv['force']:
+        while minute_dt() - last_cycle_at > cycle_minutes_td:
+            last_cycle_at += cycle_minutes_td
     just_ran = True
 
     while True:
@@ -188,7 +189,7 @@ def main():
             status = "Next update in: '{}' at: '{}'".format(
                 'Idle' if update_in < timedelta(0) else 'Remote' if screen['is_remote'] else str(update_in)[:-3].zfill(5),
                 minute_dt(update_due_at, local=True))
-            if argv['cycle']:
+            if argv['cycle'] and seen_json['last_accepted']:
                 cycle_in = cycle_due_at - minute_dt()
                 status += " Cycle in: '{}'".format(str(cycle_in)[:-3].zfill(5))
             print_status(status)
