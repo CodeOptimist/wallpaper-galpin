@@ -50,6 +50,10 @@ has_lf = True
 @click.option('--scale-minutes/--no-scale-minutes', default=True, show_default=True,
               help="Scale --MINUTES with connected monitor count, e.g. every 2 hours when 2 monitors."
                    " Useful as you may quickly exhaust all weekly photos from the subreddit otherwise.")
+@click.option('--cycle/--no-cycle', default=True, show_default=True,
+              help="Cycle last wallpaper images among monitors. Only those that will fit.")
+@click.option('--cycle-minutes', type=click.IntRange(min=1), default=60, show_default=True,
+              help="Cycle interval in minutes.")
 @click.option('--force/--no-force', default=False, show_default=True,
               help="Force an immediate update, regardless of whether it's due. Then proceeds as scheduled.")
 @click.option('--min-fit', default=0.0, show_default=True,
@@ -97,7 +101,7 @@ def init():
 
 def load_seen():
     global seen_json
-    seen_json_defaults = {'accepted': [], 'rejected': []}
+    seen_json_defaults = {'last_accepted': [], 'accepted': [], 'rejected': []}
     try:
         with open(SEEN_JSON_PATH, 'r+') as f:
             seen_json = json.load(f)
@@ -145,7 +149,11 @@ def minute_dt(dt=None, local=False):
 def main():
     global update_every_m
     print("For proper status messages don't resize this window. Leave running for scheduled updates.")
-    last_interval_at = minute_dt(datetime.min) if argv['force'] else get_file_modified_at(SEEN_JSON_PATH)
+    last_update_at = minute_dt(datetime.min) if argv['force'] else get_file_modified_at(SEEN_JSON_PATH)
+    last_cycle_at = last_update_at
+    cycle_minutes_td = timedelta(minutes=argv['cycle_minutes'])
+    while minute_dt() - last_cycle_at > cycle_minutes_td:
+        last_cycle_at += cycle_minutes_td
     just_ran = True
 
     while True:
@@ -153,14 +161,21 @@ def main():
         update_every_m = argv['minutes'] * (len(monitors) if argv['scale_minutes'] else 1)
         print_status()
 
-        update_due_at = last_interval_at + timedelta(minutes=update_every_m)
-        is_update_due = minute_dt() > update_due_at
+        update_due_at = last_update_at + timedelta(minutes=update_every_m)
+        is_update_due = minute_dt() >= update_due_at
+        cycle_due_at = last_cycle_at + cycle_minutes_td
+        is_cycle_due = minute_dt() >= cycle_due_at
         idle_s = ahk.f('A_TimeIdlePhysical') / 1000
 
         if is_update_due and not screen['is_remote'] and (just_ran or idle_s <= 60):
             print_status("Update at: '{}'".format(minute_dt(local=True)))
             update_wallpaper()
-            last_interval_at = minute_dt()
+            last_update_at = minute_dt()
+            last_cycle_at = minute_dt()
+        elif argv['cycle'] and is_cycle_due and seen_json['last_accepted']:
+            # print_status("Cycle at: '{}'".format(minute_dt(local=True)))
+            cycle_wallpaper()
+            last_cycle_at = minute_dt()
         else:
             if just_ran and argv['use_saved'] and os.path.isfile(wallpaper_path):
                 set_wallpaper(wallpaper_path)
@@ -170,10 +185,13 @@ def main():
                 sys.exit()
 
             update_in = update_due_at - minute_dt()
-            print_status("Next update in: '{}' at: '{}'".format(
+            status = "Next update in: '{}' at: '{}'".format(
                 'Idle' if update_in < timedelta(0) else 'Remote' if screen['is_remote'] else str(update_in)[:-3].zfill(5),
                 minute_dt(update_due_at, local=True))
-            )
+            if argv['cycle']:
+                cycle_in = cycle_due_at - minute_dt()
+                status += " Cycle in: '{}'".format(str(cycle_in)[:-3].zfill(5))
+            print_status(status)
             time.sleep(30)
 
         just_ran = False
@@ -181,32 +199,29 @@ def main():
 
 def update_wallpaper():
     global seen_json
+    old_tmp = set(glob.glob(os.path.join(TMP_DIR, '*.*'), recursive=False))
 
-    old_tmp = list(glob.glob(os.path.join(TMP_DIR, '*.*'), recursive=False))
-    old_accepted = seen_json['accepted'].copy()
-
-    wallpaper = None
     try:
-        wallpaper = get_wallpaper()
+        wallpaper, accepted = get_wallpaper()
+        wallpaper.save(wallpaper_path)
+        set_wallpaper(wallpaper_path)
+        for img_name in accepted:
+            seen_append('accepted', img_name)
+        seen_json['last_accepted'] = accepted
+        log("stitching wallpaper")
+
+        for entry in old_tmp:
+            if os.path.basename(entry) not in accepted:
+                os.remove(entry)
     except OutpacedError:
         log("Suitable image not found within {} pages. Skipping update."
             " Updates have outpaced the subreddit, you may need a longer time (--MINUTES) or relaxed image requirements.".format(MAX_PAGE_COUNT))
-
-    if wallpaper:
-        wallpaper.save(wallpaper_path)
-        set_wallpaper(wallpaper_path)
-        log("stitching wallpaper")
-    else:
-        seen_json['accepted'] = old_accepted
+    except OSError:
+        pass
 
     with open(SEEN_JSON_PATH, 'w') as f:
         json.dump(seen_json, f)
 
-    for entry in old_tmp:
-        try:
-            os.remove(entry)
-        except OSError:
-            pass
 
 
 def print_status(msg=""):
@@ -249,10 +264,73 @@ def fetch_json(after):
             time.sleep(FETCH_RETRY_DELAY_S)
 
 
+def get_monitor_image_candidates(img_paths):
+    images = {}
+    result_paths = OrderedDict()
+    for mon_idx, monitor in monitors.items():
+        result_paths[mon_idx] = []
+        for img_path in img_paths:
+            try:
+                img = validate_img(img_path, monitor)
+                images[img_path] = img
+                result_paths[mon_idx].append(img_path)
+            except (ImageRejectedError, MonitorImageRejectedError):
+                continue
+    return images, result_paths
+
+
+def assign_unique(dict_):
+    results = {}
+    items = list(dict_.items())
+
+    while True:
+        if not any(lst for key, lst in items):
+            return results
+        for idx, (key, lst) in enumerate(items):
+            if len(lst) == max(min(len(lst) for key, lst in items), 1):
+                val = lst[0]
+                results[key] = val
+                items = items[:idx] + items[idx + 1:]
+                for _, lst_ in items:
+                    try: lst_.remove(val)
+                    except ValueError: pass
+                break
+
+
+def get_cycled_wallpaper():
+    img_paths = [os.path.join(TMP_DIR, img_name) for img_name in seen_json['last_accepted']]
+    images, mon_candidate_dict = get_monitor_image_candidates(img_paths)
+    mon_img_dict = assign_unique(mon_candidate_dict)
+    if len(mon_img_dict) < len(monitors):
+        return None
+
+    result = Image.new("RGB", (screen['w'], screen['h']))
+    for mon_idx, monitor in monitors.items():
+        img_path = mon_img_dict[mon_idx]
+        img = images[img_path]
+        stitch_wallpaper(result, img, img_path, monitor)
+
+    for _, img in images.items():
+        img.close()  # manually close any unused
+    return result
+
+
+def cycle_wallpaper():
+    # cycle images
+    seen_json['last_accepted'] = seen_json['last_accepted'][1:] + [seen_json['last_accepted'][0]]
+    wallpaper = get_cycled_wallpaper()
+
+    if wallpaper:
+        wallpaper.save(wallpaper_path)
+        set_wallpaper(wallpaper_path)
+        # log("stitching wallpaper")
+
+
 def get_wallpaper():
     global seen_json
     sub_json = fetch_json(after="")  # fetch #1
 
+    new_accepted = []
     wallpaper = Image.new("RGB", (screen['w'], screen['h']))
     for idx, monitor in monitors.items():
         rejected_wh = 'rejected_{}_{}'.format(monitor['w'], monitor['h'])
@@ -262,20 +340,24 @@ def get_wallpaper():
         try:
             for _page_fetch_num in range(2, MAX_PAGE_COUNT + 1):
                 for img_json in sub_json['data']['children']:
-                    img_name = os.path.basename(img_json['data']['url'])
-                    already_seen = any(img_name in seen_json[k] for k in ('accepted', 'rejected', rejected_wh))
-                    if already_seen:
+                    img_json_name = os.path.basename(img_json['data']['url'])
+                    past_seen = any(img_json_name in seen_json[k] for k in ('accepted', 'rejected', rejected_wh))
+                    if past_seen or img_json_name in new_accepted:
                         continue
 
                     try:
-                        stitch_wallpaper(img_json, wallpaper, monitor)
+                        img_url = validate_img_json(img_json, monitor)
+                        img_path = fetch_img(img_url)
+                        assert img_json_name == os.path.basename(img_path)
+                        img = validate_img(img_path, monitor)
+                        stitch_wallpaper(wallpaper, img, img_path, monitor)
                         log(idx, '"{}"'.format(html.unescape(img_json['data']['title'])))
-                        seen_append('accepted', img_name)
+                        new_accepted.append(img_json_name)
                         raise ImageSuccess
                     except MonitorImageRejectedError:
-                        seen_append(rejected_wh, img_name)
+                        seen_append(rejected_wh, img_json_name)
                     except ImageRejectedError:
-                        seen_append('rejected', img_name)
+                        seen_append('rejected', img_json_name)
 
                 sub_json = fetch_json(sub_json['data']['after'])
 
@@ -284,7 +366,7 @@ def get_wallpaper():
         except ImageSuccess:
             continue
 
-    return wallpaper
+    return wallpaper, new_accepted
 
 
 # can't natively json encode a deque, so we'll use this
@@ -295,11 +377,14 @@ def seen_append(name, item):
     lst.append(item)
 
 
-def stitch_wallpaper(img_json, wallpaper, monitor):
-    img, img_path = get_img(img_json, monitor)
+def stitch_wallpaper(wallpaper, img, img_path, monitor):
     fit_img = PIL.ImageOps.fit(img, (monitor['w'], monitor['h']), PIL.Image.LANCZOS)
     name, ext = os.path.splitext(os.path.basename(img_path))
-    fit_img.save(os.path.join(TMP_DIR, name + '_fit' + '.png'))
+    fit_name = '{}_fit_{}_{}.png'.format(name, monitor['w'], monitor['h'])
+    fit_path = os.path.join(TMP_DIR, fit_name)
+    if not os.path.isfile(fit_path):
+        # just for those curious to inspect
+        fit_img.save(fit_path)
     wallpaper.paste(fit_img, (monitor['x'] - screen['x'], monitor['y'] - screen['y']))
 
 
@@ -369,7 +454,7 @@ class OutpacedError(Exception):
     pass
 
 
-def get_img(img_json, monitor):
+def validate_img_json(img_json, monitor):
     img_url = img_json['data']['url']
     if '//imgur.com/' in img_url:
         img_url = img_url.replace('//imgur.com/', '//i.imgur.com/') + '.jpg'
@@ -398,30 +483,36 @@ def get_img(img_json, monitor):
         if max(w, h) < max(monitor['w'], monitor['h']):
             raise MonitorImageRejectedError
 
-    img_path = fetch_img(img_url)
+    return img_url
+
+
+def validate_img(img_path, monitor):
     try:
         img = Image.open(img_path)
     except OSError:
         raise ImageRejectedError
-    img.load()  # immediately closes file
 
-    w, h = img.size
-    if w < monitor['w'] or h < monitor['h']:
-        raise MonitorImageRejectedError
+    try:
+        w, h = img.size
+        if w < monitor['w'] or h < monitor['h']:
+            raise MonitorImageRejectedError
 
-    is_oriented_same = (monitor['w'] / monitor['h'] >= 1) == (w / h >= 1)
-    if argv['orient'] and not is_oriented_same:
-        raise MonitorImageRejectedError
+        is_oriented_same = (monitor['w'] / monitor['h'] >= 1) == (w / h >= 1)
+        if argv['orient'] and not is_oriented_same:
+            raise MonitorImageRejectedError
 
-    img_ar = w / h
-    mon_ar = monitor['w'] / monitor['h']
-    fit_percent = (mon_ar * h) / w if img_ar >= mon_ar else (w / mon_ar) / h
+        img_ar = w / h
+        mon_ar = monitor['w'] / monitor['h']
+        fit_percent = (mon_ar * h) / w if img_ar >= mon_ar else (w / mon_ar) / h
 
-    is_fit = fit_percent >= argv['min_fit']
-    if not is_fit:
-        raise MonitorImageRejectedError
+        is_fit = fit_percent >= argv['min_fit']
+        if not is_fit:
+            raise MonitorImageRejectedError
+    except:
+        img.close()
+        raise
 
-    return img, img_path
+    return img
 
 
 def fetch_img(img_url):
