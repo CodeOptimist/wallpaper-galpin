@@ -1,5 +1,5 @@
 # Copyright (C) 2018  Christopher S. Galpin.  See /NOTICE.
-import json, os, re, glob, tempfile, time, platform, sys, html
+import json, os, re, glob, time, platform, sys, html
 from json import JSONDecodeError
 from collections import OrderedDict
 from datetime import datetime, timedelta
@@ -17,7 +17,7 @@ from gen.ShObjIdl_core import IDesktopWallpaper, DWPOS_SPAN
 # change this if you've forked the project, at the very least so the User-Agent is different
 NAME = 'wallpaper-galpin'
 APP_DIR = os.path.join(os.getenv('APPDATA'), NAME)
-TMP_DIR = os.path.join(tempfile.gettempdir(), NAME)
+LOCALAPP_DIR = os.path.join(os.getenv('LOCALAPPDATA'), NAME)
 SEEN_JSON_PATH = os.path.join(APP_DIR, 'seen.json')
 MAX_SEEN = 1000  # about how many images the most popular sees in a week
 MAX_PAGE_COUNT = 3
@@ -84,13 +84,14 @@ https://www.reddit.com/r/sfwpornnetwork/wiki/network
 
 
 def init():
-    global ahk, wallpaper_path
-    wallpaper_path = os.path.join(APP_DIR, 'wallpaper-' + argv['subreddit'] + '.png')
+    global ahk, sub_dir, wallpaper_path
+    sub_dir = os.path.join(LOCALAPP_DIR, argv['subreddit'])
+    wallpaper_path = os.path.join(LOCALAPP_DIR, argv['subreddit'] + '.png')
     ahk = AutoHotkey()
 
     try: os.makedirs(APP_DIR)
     except FileExistsError: pass
-    try: os.makedirs(TMP_DIR)
+    try: os.makedirs(LOCALAPP_DIR)
     except FileExistsError: pass
 
     load_seen()
@@ -200,7 +201,7 @@ def main():
 
 def update_wallpaper():
     global seen_json
-    old_tmp = set(glob.glob(os.path.join(TMP_DIR, '*.*'), recursive=False))
+    old_tmp = set(glob.glob(os.path.join(sub_dir, '*.*'), recursive=False))
 
     try:
         wallpaper, accepted = get_wallpaper()
@@ -212,7 +213,8 @@ def update_wallpaper():
         log("stitching wallpaper")
 
         for entry in old_tmp:
-            if os.path.basename(entry) not in accepted:
+            # keep anything we re-used
+            if re.sub(r'_\d+_\d+\.', r'.', os.path.basename(entry)) not in accepted:
                 os.remove(entry)
     except OutpacedError:
         log("Suitable image not found within {} pages. Skipping update."
@@ -299,7 +301,7 @@ def assign_unique(dict_):
 
 
 def get_cycled_wallpaper():
-    img_paths = [os.path.join(TMP_DIR, img_basename) for img_basename in seen_json['last_accepted']]
+    img_paths = [os.path.join(sub_dir, img_basename) for img_basename in seen_json['last_accepted']]
     images, mon_candidate_dict = get_monitor_image_candidates(img_paths)
     mon_img_dict = assign_unique(mon_candidate_dict)
     if len(mon_img_dict) < len(monitors):
@@ -330,6 +332,10 @@ def cycle_wallpaper():
 def get_wallpaper():
     global seen_json
     sub_json = fetch_json(after="")  # fetch #1
+
+    # sub is known valid
+    try: os.makedirs(sub_dir)
+    except FileExistsError: pass
 
     new_accepted = []
     wallpaper = Image.new("RGB", (screen['w'], screen['h']))
@@ -380,8 +386,8 @@ def seen_append(name, item):
 def stitch_wallpaper(wallpaper, img, img_path, monitor):
     fit_img = PIL.ImageOps.fit(img, (monitor['w'], monitor['h']), PIL.Image.LANCZOS)
     name, _ = os.path.splitext(os.path.basename(img_path))
-    fit_name = '{}_fit_{}_{}.png'.format(name, monitor['w'], monitor['h'])
-    fit_path = os.path.join(TMP_DIR, fit_name)
+    fit_name = '{}_{}_{}.png'.format(name, monitor['w'], monitor['h'])
+    fit_path = os.path.join(sub_dir, fit_name)
     if not os.path.isfile(fit_path):
         # just for those curious to inspect
         fit_img.save(fit_path)
@@ -521,7 +527,7 @@ def validate_img(img_path, monitor):
 
 def fetch_img(url):
     basename = os.path.basename(url)
-    path = os.path.join(TMP_DIR, basename)
+    path = os.path.join(sub_dir, basename)
     for fetch_attempt_num in range(1, FETCH_RETRY_COUNT + 1):
         try:
             if not os.path.isfile(path):
