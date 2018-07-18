@@ -284,6 +284,12 @@ def fetch_json(after):
             if not sub_json['data']['children']:
                 raise ValueError("'{}' doesn't appear to be a valid subreddit".format(argv['subreddit']))
 
+            json_basename = argv['subreddit'] + '.json'
+            json_path = os.path.join(LOCALAPP_DIR, json_basename)
+            with open(json_path, 'w') as f:
+                # just for debugging or those curious to inspect
+                json.dump(sub_json, f)
+
             return sub_json
         except (ConnectionError, TimeoutError):
             if fetch_attempt_num == FETCH_RETRY_COUNT:
