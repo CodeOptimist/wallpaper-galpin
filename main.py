@@ -52,7 +52,7 @@ has_lf = True
                    " Useful as you may quickly exhaust all weekly photos from the subreddit otherwise.")
 @click.option('--cycle/--no-cycle', default=True, show_default=True,
               help="Cycle last wallpaper images among monitors. Only those that will fit.")
-@click.option('--cycle-minutes', type=click.IntRange(min=1), default=60, show_default=True,
+@click.option('--cycle-minutes', type=click.IntRange(min=1), default=15, show_default=True,
               help="Cycle interval in minutes.")
 @click.option('--force/--no-force', default=False, show_default=True,
               help="Force an immediate update, regardless of whether it's due. Then proceeds as scheduled.")
@@ -408,7 +408,15 @@ def stitch_wallpaper(wallpaper, img, img_path, monitor):
 
 
 def set_wallpaper(path):
-    # # doesn't work due to limitation of calling AutoHotkey.dll (uses SendMessage/PostMessage):
+    com_obj = CreateObject('{C2CF3110-460E-4fc1-B9D0-8A1C0C9CC4BD}', interface=IDesktopWallpaper)
+    try:
+        com_obj.SetWallpaper(None, path)
+    except COMError as e:
+        log(repr(e))
+    com_obj.SetPosition(DWPOS_SPAN)
+    com_obj.Release()
+
+    # # this equivalent AutoHotkey code doesn't work due to limitation of calling AutoHotkey.dll (uses SendMessage/PostMessage):
     # # "An outgoing call cannot be made since the application is dispatching an input-synchronous call."
     # # Anyone have a solution?
     # ahk.execute("""
@@ -423,14 +431,6 @@ def set_wallpaper(path):
     #     DllCall(setPosition, "Ptr", ptr, "Int", DWPOS_SPAN)
     #     ObjRelease(ptr)
     # """)
-
-    com_obj = CreateObject('{C2CF3110-460E-4fc1-B9D0-8A1C0C9CC4BD}', interface=IDesktopWallpaper)
-    try:
-        com_obj.SetWallpaper(None, path)
-    except COMError as e:
-        log(repr(e))
-    com_obj.SetPosition(DWPOS_SPAN)
-    com_obj.Release()
 
 
 def update_monitor_info():
