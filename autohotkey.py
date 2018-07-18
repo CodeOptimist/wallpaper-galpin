@@ -16,7 +16,9 @@ class AutoHotkey(object):
         result = ctypes.cast(int(result), ctypes.c_wchar_p)
         result = result.value
         if result is not None:
-            if result.startswith('0x') or result.isdigit():
+            is_hex = result.startswith('0x') and result[2:].isdigit()
+            is_negative = result.startswith('-') and result[1:].isdigit()
+            if result.isdigit() or is_hex or is_negative:
                 result = int(result, 0)
         return result
 
@@ -29,22 +31,25 @@ class AutoHotkey(object):
             raise ValueError("Variable names may only consist of letters, numbers and the following punctuation: # _ @ $")
 
         # the following causes a heap corruption:
-        # ahkExec('result = abc')
-        # ahkExec('result = 1234')
+        # ahkAssign('result', 'abc')
+        # ahkAssign('result', '1234')
         # ahkGetVar('result', 0)
         # ahkGetVar('result', 0)
         # where the second assignment is a number (be it "1234" or 1234) of a longer length than the first assignment
 
         # we can work around it by copying to a fresh variable before retrieving
-        self._ahk.ahkExec('__get =') # clear variable or bug can still occur from previous use
+        self._ahk.ahkAssign('__get', '') # clear variable or bug can still occur from previous use
         # '= %var%' vs. ':= var' to help enforce a variable name instead of arbitrary code
         self._ahk.ahkExec('__get = %{}%'.format(name))
         return self._get('__get')
+
+    def set(self, name, val):
+        self._ahk.ahkAssign(name, val)
 
     def execute(self, script):
         return self._ahk.ahkExec(script)
 
     def f(self, script):
-        self._ahk.ahkExec('__f =')
+        self._ahk.ahkAssign('__f' ,'')
         self._ahk.ahkExec('__f := ' + script)
         return self._get('__f')
