@@ -68,7 +68,7 @@ has_lf = True
 @click.option('--forget-rejected', default=False, is_flag=True, show_default=True,
               help="Wipe memory of rejected images so they may be reevaluated against new --MIN-FIT or --ORIENT parameters."
                    " This isn't necessary for monitor resolution changes.")
-@click.option('--use-saved/--no-use-saved', default=True, show_default=True,
+@click.option('--refit-last/--no-refit-last', default=True, show_default=True,
               help="Immediately applies the previously saved subreddit wallpaper (may be the same) before proceeding as normal.")
 @click.version_option(version=version)
 def cli(**kwargs):
@@ -147,56 +147,81 @@ def minute_dt(dt=None, local=False):
     return dt
 
 
-def main():
-    global update_every_m
-    print("For proper status messages don't resize this window. Leave running for scheduled updates.")
-    last_update_at = minute_dt(datetime.min) if argv['force'] else get_file_modified_at(SEEN_JSON_PATH)
-    last_cycle_at = last_update_at
-    cycle_minutes_td = timedelta(minutes=argv['cycle_minutes'])
-    if not argv['force']:
-        while minute_dt() - last_cycle_at > cycle_minutes_td:
-            last_cycle_at += cycle_minutes_td
-    just_ran = True
+class Wallpaper():
+    def __init__(self):
+        self.last_update_at = minute_dt(datetime.min) if argv['force'] else get_file_modified_at(SEEN_JSON_PATH)
+        self.last_cycle_at = self.last_update_at
+        self.cycle_minutes_td = timedelta(minutes=argv['cycle_minutes'])
+        if not argv['force']:
+            while minute_dt() - self.last_cycle_at > self.cycle_minutes_td:
+                self.last_cycle_at += self.cycle_minutes_td
+        self.just_ran = True
 
-    while True:
-        update_monitor_info()
+    def update_due_at(self):
+        return self.last_update_at + timedelta(minutes=update_every_m)
+
+    def cycle_due_at(self):
+        return self.last_cycle_at + self.cycle_minutes_td
+
+    def poll(self):
+        global update_every_m
         update_every_m = argv['minutes'] * (len(monitors) if argv['scale_minutes'] else 1)
         print_status()
 
-        update_due_at = last_update_at + timedelta(minutes=update_every_m)
-        is_update_due = minute_dt() >= update_due_at
-        cycle_due_at = last_cycle_at + cycle_minutes_td
-        is_cycle_due = minute_dt() >= cycle_due_at
+        is_update_due = minute_dt() >= self.update_due_at()
+        is_cycle_due = minute_dt() >= self.cycle_due_at()
         idle_s = ahk.f('A_TimeIdlePhysical') / 1000
 
-        if is_update_due and not screen['is_remote'] and (just_ran or idle_s <= 60):
+        am_updating = is_update_due and not screen['is_remote'] and (self.just_ran or idle_s <= 60)
+        am_cycling = argv['cycle'] and is_cycle_due and seen_json['last_accepted']
+        am_refitting = self.just_ran and argv['refit_last']
+        if am_updating:
             print_status("Update at: '{}'".format(minute_dt(local=True)))
             update_wallpaper()
-            last_update_at = minute_dt()
-            last_cycle_at = minute_dt()
-        elif argv['cycle'] and is_cycle_due and seen_json['last_accepted']:
-            # print_status("Cycle at: '{}'".format(minute_dt(local=True)))
-            cycle_wallpaper()
-            last_cycle_at = minute_dt()
-        else:
-            if just_ran and argv['use_saved'] and os.path.isfile(wallpaper_path):
+            self.last_update_at = minute_dt()
+            self.last_cycle_at = minute_dt()
+        elif am_cycling or am_refitting:
+            if am_cycling:
+                seen_json['last_accepted'] = seen_json['last_accepted'][1:] + [seen_json['last_accepted'][0]]
+                # print_status("Cycle at: '{}'".format(minute_dt(local=True)))
+                self.last_cycle_at = minute_dt()
+
+            wallpaper = get_refitted_wallpaper()
+            if wallpaper:
+                wallpaper.save(wallpaper_path)
                 set_wallpaper(wallpaper_path)
 
-            if not argv['daemon']:
-                log("exiting")
-                sys.exit()
+        if not argv['daemon']:
+            log("exiting")
+            sys.exit()
 
-            update_in = update_due_at - minute_dt()
-            status = "Next update in: '{}' at: '{}'".format(
-                'Idle' if update_in < timedelta(0) else 'Remote' if screen['is_remote'] else str(update_in)[:-3].zfill(5),
-                minute_dt(update_due_at, local=True))
-            if argv['cycle'] and seen_json['last_accepted']:
-                cycle_in = cycle_due_at - minute_dt()
-                status += " Cycle in: '{}'".format(str(cycle_in)[:-3].zfill(5))
-            print_status(status)
-            time.sleep(30)
+        status = self.get_full_status()
+        print_status(status)
 
-        just_ran = False
+        self.just_ran = False
+
+    def get_full_status(self):
+        update_in = self.update_due_at() - minute_dt()
+        status = "Next update in: '{}' at: '{}'".format(
+            'Idle' if update_in < timedelta(0) else 'Remote' if screen['is_remote'] else str(update_in)[:-3].zfill(5),
+            minute_dt(self.update_due_at(), local=True))
+        if argv['cycle'] and seen_json['last_accepted']:
+            cycle_in = self.cycle_due_at() - minute_dt()
+            status += " Cycle in: '{}'".format(str(cycle_in)[:-3].zfill(5))
+        return status
+
+
+def main():
+    print("For proper status messages don't resize this window. Leave running for scheduled updates.")
+    wallpaper = Wallpaper()
+
+    ts = 0
+    while True:
+        s_elapsed = time.time() - ts
+        if s_elapsed >= 30:
+            wallpaper.poll()
+            ts = time.time()
+        time.sleep(0.01)
 
 
 def update_wallpaper():
@@ -224,7 +249,6 @@ def update_wallpaper():
 
     with open(SEEN_JSON_PATH, 'w') as f:
         json.dump(seen_json, f)
-
 
 
 def print_status(msg=""):
@@ -300,7 +324,7 @@ def assign_unique(dict_):
                 break
 
 
-def get_cycled_wallpaper():
+def get_refitted_wallpaper():
     img_paths = [os.path.join(sub_dir, img_basename) for img_basename in seen_json['last_accepted']]
     images, mon_candidate_dict = get_monitor_image_candidates(img_paths)
     mon_img_dict = assign_unique(mon_candidate_dict)
@@ -316,17 +340,6 @@ def get_cycled_wallpaper():
     for _, img in images.items():
         img.close()  # manually close any unused
     return result
-
-
-def cycle_wallpaper():
-    # cycle images
-    seen_json['last_accepted'] = seen_json['last_accepted'][1:] + [seen_json['last_accepted'][0]]
-    wallpaper = get_cycled_wallpaper()
-
-    if wallpaper:
-        wallpaper.save(wallpaper_path)
-        set_wallpaper(wallpaper_path)
-        # log("stitching wallpaper")
 
 
 def get_wallpaper():
