@@ -39,6 +39,7 @@ def get_version():
 
 version = get_version()
 has_lf = True
+monitors = OrderedDict()
 
 
 @click.command(name=NAME, context_settings={'terminal_width': 100})
@@ -212,6 +213,7 @@ class Wallpaper():
 
     def poll(self):
         global update_every_m
+        is_monitor_change = update_monitor_info()
         update_every_m = argv['minutes'] * (len(monitors) if argv['scale_minutes'] else 1)
         print_status()
 
@@ -221,7 +223,7 @@ class Wallpaper():
 
         am_updating = is_update_due and not screen['is_remote'] and (self.just_ran or idle_s <= 60)
         am_cycling = argv['cycle'] and is_cycle_due and seen_json['last_accepted']
-        am_refitting = self.just_ran and argv['refit_last']
+        am_refitting = self.just_ran and argv['refit_last'] or is_monitor_change
         if am_updating:
             print_status("Update at: '{}'".format(minute_dt(local=True)))
             update_wallpaper()
@@ -497,16 +499,27 @@ def set_wallpaper(path):
 def update_monitor_info():
     global screen, monitors
     screen = get_screen_info()
-    monitors = OrderedDict()
+    new_monitors = OrderedDict()
     for idx in range(1, screen['mon_count'] + 1):
-        monitors[idx] = {}
+        new_monitors[idx] = {}
         ahk.execute('SysGet, mon{0}, Monitor, {0}'.format(idx))
-        l, t, r, b = [int(ahk.get('mon{}{}'.format(idx, side))) for side in ("Left", "Top", "Right", "Bottom")]
+        try:
+            l, t, r, b = [int(ahk.get('mon{}{}'.format(idx, side))) for side in ("Left", "Top", "Right", "Bottom")]
+        except ValueError:
+            continue
 
-        monitors[idx]['x'] = l
-        monitors[idx]['y'] = t
-        monitors[idx]['w'] = r - l
-        monitors[idx]['h'] = b - t
+        new_monitors[idx]['x'] = l
+        new_monitors[idx]['y'] = t
+        new_monitors[idx]['w'] = r - l
+        new_monitors[idx]['h'] = b - t
+        try:
+            new_monitors[idx]['img_name'] = monitors[idx]['img_name']
+        except KeyError: pass
+
+    if new_monitors != monitors:
+        monitors = new_monitors
+        return True
+    return False
 
 
 def get_screen_info():
