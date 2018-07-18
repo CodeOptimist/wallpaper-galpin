@@ -3,6 +3,7 @@ import json, os, re, glob, time, platform, sys, html
 from json import JSONDecodeError
 from collections import OrderedDict
 from datetime import datetime, timedelta
+from enum import Enum
 
 import requests, pytz, tzlocal, click
 from _ctypes import COMError
@@ -102,7 +103,7 @@ def init():
 
 def load_seen():
     global seen_json
-    seen_json_defaults = {'last_accepted': [], 'accepted': [], 'rejected': []}
+    seen_json_defaults = {'descriptions':{}, 'last_accepted': [], 'accepted': [], 'rejected': []}
     try:
         with open(SEEN_JSON_PATH, 'r+') as f:
             seen_json = json.load(f)
@@ -145,6 +146,52 @@ def minute_dt(dt=None, local=False):
     if local:
         dt = dt.astimezone(tzlocal.get_localzone())
     return dt
+
+
+Hotkey = Enum('Hotkey', 'DESCRIPTION')
+
+
+class Hotkeys():
+    def __init__(self):
+        # context-sensitive hotkeys seem to only work from the dll in the standalone exe (frozen)
+        # otherwise crashes with 0xC0000374 heap corruption when exiting
+        if getattr(sys, 'frozen', False):
+            script = """
+                #IfWinActive ahk_class Progman
+                ~MButton::
+                #IfWinActive ahk_class WorkerW
+                ~MButton::
+                    pressed_hotkey = {DESCRIPTION}
+                return
+            """
+        else:
+            # this method always works
+            script = """
+                ~MButton::
+                    if (WinActive("ahk_class Progman") or WinActive("ahk_class WorkerW")) {{
+                        pressed_hotkey = {DESCRIPTION}
+                    }}
+                return
+            """
+        ahk.execute(script.format(**Hotkey.__dict__))
+
+    def poll(self):
+        pressed_hotkey = ahk.get('pressed_hotkey')
+        ahk.set('pressed_hotkey', '')
+        if pressed_hotkey == str(Hotkey.DESCRIPTION):
+            ahk.execute("""
+                CoordMode, Mouse, Screen
+                MouseGetPos, x, y
+            """)
+            for mon_idx, monitor in monitors.items():
+                in_x = monitor['x'] <= ahk.get('x') <= monitor['x'] + monitor['w']
+                in_y = monitor['y'] <= ahk.get('y') <= monitor['y'] + monitor['h']
+                if in_x and in_y and 'img_name' in monitor:
+                    try:
+                        desc = seen_json['descriptions'][monitor['img_name']]
+                    except KeyError:
+                        desc = "Missing description."
+                    ahk.tooltip(desc, 10)
 
 
 class Wallpaper():
@@ -212,14 +259,19 @@ class Wallpaper():
 
 
 def main():
+    global ahk
     print("For proper status messages don't resize this window. Leave running for scheduled updates.")
+    hotkeys = Hotkeys()
     wallpaper = Wallpaper()
 
     ts = 0
     while True:
+        hotkeys.poll()
         s_elapsed = time.time() - ts
         if s_elapsed >= 30:
             wallpaper.poll()
+            ahk = AutoHotkey()  # free ahk memory!
+            hotkeys = Hotkeys()  # reinitialize hotkeys
             ts = time.time()
         time.sleep(0.01)
 
@@ -232,9 +284,10 @@ def update_wallpaper():
         wallpaper, accepted = get_wallpaper()
         wallpaper.save(wallpaper_path)
         set_wallpaper(wallpaper_path)
-        for img_basename in accepted:
+        for img_basename in accepted.keys():
             seen_append('accepted', img_basename)
-        seen_json['last_accepted'] = accepted
+        seen_json['last_accepted'] = list(accepted.keys())
+        seen_json['descriptions'] = accepted
         log("stitching wallpaper")
 
         for entry in old_tmp:
@@ -356,7 +409,7 @@ def get_wallpaper():
     try: os.makedirs(sub_dir)
     except FileExistsError: pass
 
-    new_accepted = []
+    new_accepted = {}
     wallpaper = Image.new("RGB", (screen['w'], screen['h']))
     for idx, monitor in monitors.items():
         rejected_wh = 'rejected_{}_{}'.format(monitor['w'], monitor['h'])
@@ -376,8 +429,9 @@ def get_wallpaper():
                         img_path = fetch_img(img_url)
                         img = validate_img(img_path, monitor)
                         stitch_wallpaper(wallpaper, img, img_path, monitor)
-                        log(idx, '"{}"'.format(html.unescape(img_json['data']['title'])))
-                        new_accepted.append(img_basename)
+                        desc = html.unescape(img_json['data']['title'] + ' - u/' + img_json['data']['author'])
+                        log(idx, '"{}"'.format(desc))
+                        new_accepted[img_basename] = desc
                         raise ImageSuccess
                     except MonitorImageRejectedError:
                         seen_append(rejected_wh, img_basename)
@@ -411,6 +465,7 @@ def stitch_wallpaper(wallpaper, img, img_path, monitor):
         # just for those curious to inspect
         fit_img.save(fit_path)
     wallpaper.paste(fit_img, (monitor['x'] - screen['x'], monitor['y'] - screen['y']))
+    monitor['img_name'] = os.path.basename(img_path)
 
 
 def set_wallpaper(path):

@@ -53,3 +53,19 @@ class AutoHotkey(object):
         self._ahk.ahkAssign('__f' ,'')
         self._ahk.ahkExec('__f := ' + script)
         return self._get('__f')
+
+    def tooltip(self, text, s):
+        if not self.f('IsLabel("RemoveToolTip")'):
+            self.execute("""
+                RemoveToolTip:
+                    SetTimer, RemoveToolTip, Off
+                    ToolTip,
+                    return
+            """)
+
+        self.set('__tooltip', text)
+        self.execute("""
+            ToolTip, % __tooltip
+            SetTimer, RemoveToolTip, {s}
+            return
+        """.format(s=int(s * 1000)))
