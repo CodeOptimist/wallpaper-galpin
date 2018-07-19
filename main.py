@@ -1,5 +1,5 @@
 # Copyright (C) 2018  Christopher S. Galpin.  See /NOTICE.
-import json, os, re, glob, time, platform, sys, html
+import json, os, re, glob, time, platform, sys, html, warnings
 from json import JSONDecodeError
 from collections import OrderedDict
 from datetime import datetime, timedelta
@@ -24,6 +24,8 @@ MAX_SEEN = 1000  # about how many images the most popular sees in a week
 MAX_PAGE_COUNT = 3
 FETCH_RETRY_COUNT = 3
 FETCH_RETRY_DELAY_S = 60
+# Pillow will still throw DecompressionBombError if over 2 * Image.MAX_IMAGE_PIXELS, which is fine
+warnings.simplefilter('ignore', Image.DecompressionBombWarning)
 
 
 def get_version():
