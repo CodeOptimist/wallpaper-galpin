@@ -46,7 +46,7 @@ monitors = OrderedDict()
 
 @click.command(name=NAME, context_settings={'terminal_width': 100})
 @click.argument('subreddit', default='earthporn')
-@click.option('--daemon/--no-daemon', default=True, show_default=True,
+@click.option('--persist/--no-persist', default=True, show_default=True,
               help="Keeps program running to update on an automated schedule."
                    " Otherwise exits immediately after applying a due update. (--FORCE will always update.)")
 @click.option('--minutes', type=click.IntRange(min=15), default=60, show_default=True,
@@ -242,7 +242,7 @@ class Wallpaper():
                 wallpaper.save(wallpaper_path)
                 set_wallpaper(wallpaper_path)
 
-        if not argv['daemon']:
+        if not argv['persist']:
             log("exiting")
             sys.exit()
 
