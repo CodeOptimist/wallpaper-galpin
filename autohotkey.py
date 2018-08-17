@@ -31,8 +31,8 @@ class AutoHotkey(object):
             raise ValueError("Variable names may only consist of letters, numbers and the following punctuation: # _ @ $")
 
         # the following causes a heap corruption:
-        # ahkAssign('result', 'abc')
-        # ahkAssign('result', '1234')
+        # ahkExec('result = abc') # or ahkAssign('result', 'abc')
+        # ahkExec('result = 1234') # ahkAssign('result', '1234') seems safe
         # ahkGetVar('result', 0)
         # ahkGetVar('result', 0)
         # where the second assignment is a number (be it "1234" or 1234) of a longer length than the first assignment
