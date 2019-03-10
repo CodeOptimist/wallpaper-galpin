@@ -11,7 +11,7 @@ import PIL.ImageOps
 from PIL import Image
 from comtypes.client import CreateObject
 
-from autohotkey import AutoHotkey
+from autohotkey import Script
 from gen.ShObjIdl_core import IDesktopWallpaper, DWPOS_SPAN
 
 
@@ -42,6 +42,32 @@ def get_version():
 version = get_version()
 has_lf = True
 monitors = OrderedDict()
+
+Hotkey = Enum('Hotkey', 'DESCRIPTION')
+script = """
+StoreMousePos() {
+    global x, y
+    CoordMode, Mouse, Screen
+    MouseGetPos, x, y
+}
+
+StoreSysGetMonitors(idx) {
+    global
+    SysGet, mon%idx%, Monitor, % idx
+}
+
+StoreSysGet(n) {
+    global result
+    SysGet, result, % n
+}
+
+#IfWinActive ahk_class Progman
+~MButton::
+#IfWinActive ahk_class WorkerW
+~MButton::
+    pressed_hotkey = """ + str(Hotkey.DESCRIPTION) + """
+return
+"""
 
 
 @click.command(name=NAME, context_settings={'terminal_width': 100})
@@ -91,7 +117,7 @@ def init():
     global ahk, sub_dir, wallpaper_path
     sub_dir = os.path.join(LOCALAPP_DIR, argv['subreddit'])
     wallpaper_path = os.path.join(LOCALAPP_DIR, argv['subreddit'] + '.png')
-    ahk = AutoHotkey()
+    ahk = Script(script)
 
     try: os.makedirs(APP_DIR)
     except FileExistsError: pass
@@ -101,7 +127,7 @@ def init():
     load_seen()
 
     PROCESS_PER_MONITOR_DPI_AWARE = 0x2
-    ahk.execute('DllCall("Shcore.dll\SetProcessDpiAwareness", Int, {})'.format(PROCESS_PER_MONITOR_DPI_AWARE))
+    ahk.f('DllCall', r"Shcore.dll\SetProcessDpiAwareness", 'Int', PROCESS_PER_MONITOR_DPI_AWARE)
 
 
 def load_seen():
@@ -151,41 +177,12 @@ def minute_dt(dt=None, local=False):
     return dt
 
 
-Hotkey = Enum('Hotkey', 'DESCRIPTION')
-
-
-class Hotkeys():
-    def __init__(self):
-        # context-sensitive hotkeys seem to only work from the dll in the standalone exe (frozen)
-        # otherwise crashes with 0xC0000374 heap corruption when exiting
-        if getattr(sys, 'frozen', False):
-            script = """
-                #IfWinActive ahk_class Progman
-                ~MButton::
-                #IfWinActive ahk_class WorkerW
-                ~MButton::
-                    pressed_hotkey = {DESCRIPTION}
-                return
-            """
-        else:
-            # this method always works
-            script = """
-                ~MButton::
-                    if (WinActive("ahk_class Progman") or WinActive("ahk_class WorkerW")) {{
-                        pressed_hotkey = {DESCRIPTION}
-                    }}
-                return
-            """
-        ahk.execute(script.format(**Hotkey.__dict__))
-
+class Hotkeys:
     def poll(self):
         pressed_hotkey = ahk.get('pressed_hotkey')
         ahk.set('pressed_hotkey', '')
         if pressed_hotkey == str(Hotkey.DESCRIPTION):
-            ahk.execute("""
-                CoordMode, Mouse, Screen
-                MouseGetPos, x, y
-            """)
+            ahk.call('StoreMousePos')
             for mon_idx, monitor in monitors.items():
                 in_x = monitor['x'] <= ahk.get('x') <= monitor['x'] + monitor['w']
                 in_y = monitor['y'] <= ahk.get('y') <= monitor['y'] + monitor['h']
@@ -221,7 +218,7 @@ class Wallpaper():
 
         is_update_due = minute_dt() >= self.update_due_at()
         is_cycle_due = minute_dt() >= self.cycle_due_at()
-        idle_s = ahk.f('A_TimeIdlePhysical') / 1000
+        idle_s = ahk.get('A_TimeIdlePhysical') / 1000
 
         am_updating = is_update_due and not screen['is_remote'] and (self.just_ran or idle_s <= 60)
         am_cycling = argv['cycle'] and is_cycle_due and seen_json['last_accepted']
@@ -263,7 +260,6 @@ class Wallpaper():
 
 
 def main():
-    global ahk
     print("For proper status messages don't resize this window. Leave running for scheduled updates.")
     hotkeys = Hotkeys()
     wallpaper = Wallpaper()
@@ -274,8 +270,6 @@ def main():
         s_elapsed = time.time() - ts
         if s_elapsed >= 30:
             wallpaper.poll()
-            ahk = AutoHotkey()  # free ahk memory!
-            hotkeys = Hotkeys()  # reinitialize hotkeys
             ts = time.time()
         time.sleep(0.01)
 
@@ -481,21 +475,15 @@ def set_wallpaper(path):
     com_obj.SetPosition(DWPOS_SPAN)
     com_obj.Release()
 
-    # # this equivalent AutoHotkey code doesn't work due to limitation of calling AutoHotkey.dll (uses SendMessage/PostMessage):
-    # # "An outgoing call cannot be made since the application is dispatching an input-synchronous call."
-    # # Anyone have a solution?
-    # ahk.execute("""
-    #     ptr := ComObjCreate("{C2CF3110-460E-4fc1-B9D0-8A1C0C9CC4BD}", "{B92B56A9-8B55-4E14-9A89-0199BBB6F93B}")
-    #     vTbl := NumGet(ptr + 0, 0, "Ptr")
-    #     setWallpaper := NumGet(vTbl + 0, 3 * A_PtrSize, "Ptr")
-    #     setPosition := NumGet(vTbl + 0, 10 * A_PtrSize, "Ptr")
-    # """)
-    # ahk.execute('DllCall(setWallpaper, "Ptr", ptr, "Str", "", "Str", "{}")'.format(wallpaper_path))
-    # ahk.execute("""
-    #     DWPOS_SPAN := 5
-    #     DllCall(setPosition, "Ptr", ptr, "Int", DWPOS_SPAN)
-    #     ObjRelease(ptr)
-    # """)
+    # AutoHotkey equivalent
+    # ptr := ComObjCreate("{C2CF3110-460E-4fc1-B9D0-8A1C0C9CC4BD}", "{B92B56A9-8B55-4E14-9A89-0199BBB6F93B}")
+    # vTbl := NumGet(ptr + 0, 0, "Ptr")
+    # setWallpaper := NumGet(vTbl + 0, 3 * A_PtrSize, "Ptr")
+    # setPosition := NumGet(vTbl + 0, 10 * A_PtrSize, "Ptr")
+    # DllCall(setWallpaper, "Ptr", ptr, "Str", "", "Str", wallpaperPath)
+    # DWPOS_SPAN := 5
+    # DllCall(setPosition, "Ptr", ptr, "Int", DWPOS_SPAN)
+    # ObjRelease(ptr)
 
 
 def update_monitor_info():
@@ -504,7 +492,7 @@ def update_monitor_info():
     new_monitors = OrderedDict()
     for idx in range(1, screen['mon_count'] + 1):
         new_monitors[idx] = {}
-        ahk.execute('SysGet, mon{0}, Monitor, {0}'.format(idx))
+        ahk.call('StoreSysGetMonitors', idx)
         try:
             l, t, r, b = [int(ahk.get('mon{}{}'.format(idx, side))) for side in ("Left", "Top", "Right", "Bottom")]
         except ValueError:
@@ -528,8 +516,8 @@ def get_screen_info():
     result = {}
     SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_CMONITORS, SM_REMOTESESSION = (76, 77, 78, 79, 80, 4096)
     for c, n in zip(('x', 'y', 'w', 'h', 'mon_count', 'is_remote'), (SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_CMONITORS, SM_REMOTESESSION)):
-        ahk.execute('SysGet, result, {}'.format(n))
-        result[c] = int(ahk.get('result'))
+        ahk.call('StoreSysGet', n)
+        result[c] = int(ahk.get('result') or 0)
     return result
 
 
