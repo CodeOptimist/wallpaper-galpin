@@ -470,10 +470,11 @@ def set_wallpaper(path):
     com_obj = CreateObject('{C2CF3110-460E-4fc1-B9D0-8A1C0C9CC4BD}', interface=IDesktopWallpaper)
     try:
         com_obj.SetWallpaper(None, path)
+        com_obj.SetPosition(DWPOS_SPAN)
     except COMError as e:
         log(repr(e))
-    com_obj.SetPosition(DWPOS_SPAN)
-    com_obj.Release()
+    finally:
+        com_obj.Release()
 
     # AutoHotkey equivalent
     # ptr := ComObjCreate("{C2CF3110-460E-4fc1-B9D0-8A1C0C9CC4BD}", "{B92B56A9-8B55-4E14-9A89-0199BBB6F93B}")
