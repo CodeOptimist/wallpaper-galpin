@@ -1,5 +1,5 @@
 # Copyright (C) 2018  Christopher S. Galpin.  See /NOTICE.
-import json, os, re, glob, time, platform, sys, html, warnings
+import json, os, re, glob, time, platform, sys, html, warnings, webbrowser
 from json import JSONDecodeError
 from collections import OrderedDict
 from datetime import datetime, timedelta
@@ -132,7 +132,7 @@ def init():
 
 def load_seen():
     global seen_json
-    seen_json_defaults = {'descriptions':{}, 'last_accepted': [], 'accepted': [], 'rejected': []}
+    seen_json_defaults = {'last_info':{}, 'last_accepted': [], 'accepted': [], 'rejected': []}
     try:
         with open(SEEN_JSON_PATH, 'r+') as f:
             seen_json = json.load(f)
@@ -178,6 +178,10 @@ def minute_dt(dt=None, local=False):
 
 
 class Hotkeys:
+    def __init__(self):
+        self.dbl_click_ms = ahk.f('DllCall', 'GetDoubleClickTime')
+        self.clicked_img = None
+
     def poll(self):
         pressed_hotkey = ahk.get('pressed_hotkey')
         ahk.set('pressed_hotkey', '')
@@ -186,15 +190,33 @@ class Hotkeys:
             for mon_idx, monitor in monitors.items():
                 in_x = monitor['x'] <= ahk.get('x') <= monitor['x'] + monitor['w']
                 in_y = monitor['y'] <= ahk.get('y') <= monitor['y'] + monitor['h']
-                if in_x and in_y and 'img_name' in monitor:
+                if in_x and in_y and 'img_basename' in monitor:
+                    is_dclick = -1 < ahk.get('A_TimeSincePriorHotkey') < self.dbl_click_ms
+                    is_same_img = monitor['img_basename'] == self.clicked_img
+                    if is_dclick and is_same_img:
+                        try:
+                            _, url = get_desc_url(**seen_json['last_info'][monitor['img_basename']])
+                            webbrowser.open(url)
+                            ahk.tooltip("", 0)
+                        except KeyError:
+                            pass
                     try:
-                        desc = seen_json['descriptions'][monitor['img_name']]
+                        desc, _ = get_desc_url(**seen_json['last_info'][monitor['img_basename']])
                     except KeyError:
                         desc = "Missing description."
                     ahk.tooltip(desc, 10)
 
+                    self.clicked_img = monitor['img_basename']
+                    break
 
-class Wallpaper():
+
+def get_desc_url(title, author, permalink):
+    desc = html.unescape(title + ' - u/' + author)
+    url = 'http://reddit.com' + permalink
+    return desc, url
+
+
+class Wallpaper:
     def __init__(self):
         self.last_update_at = minute_dt(datetime.min) if argv['force'] else get_file_modified_at(SEEN_JSON_PATH)
         self.last_cycle_at = self.last_update_at
@@ -285,7 +307,7 @@ def update_wallpaper():
         for img_basename in accepted.keys():
             seen_append('accepted', img_basename)
         seen_json['last_accepted'] = list(accepted.keys())
-        seen_json['descriptions'] = accepted
+        seen_json['last_info'] = accepted
         log("stitching wallpaper")
 
         for entry in old_tmp:
@@ -427,9 +449,9 @@ def get_wallpaper():
                         img_path = fetch_img(img_url)
                         img = validate_img(img_path, monitor)
                         stitch_wallpaper(wallpaper, img, img_path, monitor)
-                        desc = html.unescape(img_json['data']['title'] + ' - u/' + img_json['data']['author'])
+                        new_accepted[img_basename] = {k: v for k, v in img_json['data'].items() if k in ('title', 'author', 'permalink')}
+                        desc, _ = get_desc_url(**new_accepted[img_basename])
                         log(idx, '"{}"'.format(desc))
-                        new_accepted[img_basename] = desc
                         raise ImageSuccess
                     except MonitorImageRejectedError:
                         seen_append(rejected_wh, img_basename)
@@ -463,7 +485,7 @@ def stitch_wallpaper(wallpaper, img, img_path, monitor):
         # just for those curious to inspect
         fit_img.save(fit_path)
     wallpaper.paste(fit_img, (monitor['x'] - screen['x'], monitor['y'] - screen['y']))
-    monitor['img_name'] = os.path.basename(img_path)
+    monitor['img_basename'] = os.path.basename(img_path)
 
 
 def set_wallpaper(path):
@@ -504,7 +526,7 @@ def update_monitor_info():
         new_monitors[idx]['w'] = r - l
         new_monitors[idx]['h'] = b - t
         try:
-            new_monitors[idx]['img_name'] = monitors[idx]['img_name']
+            new_monitors[idx]['img_basename'] = monitors[idx]['img_basename']
         except KeyError: pass
 
     if new_monitors != monitors:
