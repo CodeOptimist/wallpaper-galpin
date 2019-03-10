@@ -342,7 +342,7 @@ def fetch_json(after):
                 json.dump(sub_json, f)
 
             return sub_json
-        except (ConnectionError, TimeoutError):
+        except (ConnectionError, TimeoutError, JSONDecodeError):
             if fetch_attempt_num == FETCH_RETRY_COUNT:
                 raise
             time.sleep(FETCH_RETRY_DELAY_S)
