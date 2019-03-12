@@ -163,6 +163,8 @@ class Hotkeys:
 
     def poll(self):
         pressed_hotkey = ahk.get('pressed_hotkey')
+        if not pressed_hotkey:
+            return
         ahk.set('pressed_hotkey', '')
         if pressed_hotkey == str(Hotkey.DESCRIPTION):
             ahk.call('StoreMousePos')
