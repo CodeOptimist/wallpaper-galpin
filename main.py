@@ -39,6 +39,7 @@ def get_version():
 version = get_version()
 has_lf = True
 monitors = OrderedDict()
+session = requests.session()
 Hotkey = Enum('Hotkey', 'DESCRIPTION')
 
 
@@ -343,8 +344,9 @@ def fetch_json(after):
 
     for fetch_attempt_num in range(1, FETCH_RETRY_COUNT + 1):
         try:
-            response = requests.get(json_url, headers={
-                'User-Agent': "{} ({}):{}:{} (by /u/CodeOptimist)".format(sys.version, platform.platform(), NAME, version)
+            user_agent = "{} ({}):{}:{} (by /u/CodeOptimist)".format(sys.version, platform.platform(), NAME, version)
+            response = session.get(json_url, headers={
+                'User-Agent': user_agent
             }, timeout=30)
 
             sub_json = response.json()
@@ -604,7 +606,7 @@ def fetch_img(url):
     for fetch_attempt_num in range(1, FETCH_RETRY_COUNT + 1):
         try:
             if not os.path.isfile(path):
-                response = requests.get(url, timeout=30)
+                response = session.get(url, timeout=30)
                 img_data = response.content
                 with open(path, "wb") as f:
                     f.write(img_data)
