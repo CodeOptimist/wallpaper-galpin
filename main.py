@@ -210,8 +210,7 @@ class Wallpaper:
         self.cycle_minutes_td = timedelta(minutes=argv['cycle_minutes'])
 
         if not argv['force']:
-            while minute_dt() - self.last_cycle_at > self.cycle_minutes_td:
-                self.last_cycle_at += self.cycle_minutes_td
+            self.last_cycle_at = self.last_cycle_at + int((minute_dt() - self.last_cycle_at) / self.cycle_minutes_td) * self.cycle_minutes_td
         self.just_ran = True
 
     def update_due_at(self):
