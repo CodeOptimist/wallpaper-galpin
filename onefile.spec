@@ -31,12 +31,12 @@ try:
 
     block_cipher = None
 
-
     a = Analysis(['main.py'],
-                 pathex=['C:\\Dropbox\\Python\\wallpaper-galpin'],
+                 pathex=['C:\\Dropbox\\Python\\multimonitor-reddit-wallpaper'],
                  binaries=[],
                  datas=[
                      ('lib', 'lib'),
+                     ('script.ahk', r'.'),
                      (version_path, r'.')],
                  hiddenimports=[],
                  hookspath=[],

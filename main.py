@@ -6,13 +6,10 @@ from datetime import datetime, timedelta
 from enum import Enum
 
 import requests, pytz, tzlocal, click
-from _ctypes import COMError
 import PIL.ImageOps
 from PIL import Image
-from comtypes.client import CreateObject
 
-from autohotkey import Script
-from gen.ShObjIdl_core import IDesktopWallpaper, DWPOS_SPAN
+from autohotkey import Script, AhkExitException
 
 
 # change this if you've forked the project, at the very least so the User-Agent is different
@@ -42,32 +39,7 @@ def get_version():
 version = get_version()
 has_lf = True
 monitors = OrderedDict()
-
 Hotkey = Enum('Hotkey', 'DESCRIPTION')
-script = """
-StoreMousePos() {
-    global x, y
-    CoordMode, Mouse, Screen
-    MouseGetPos, x, y
-}
-
-StoreSysGetMonitors(idx) {
-    global
-    SysGet, mon%idx%, Monitor, % idx
-}
-
-StoreSysGet(n) {
-    global result
-    SysGet, result, % n
-}
-
-#IfWinActive ahk_class Progman
-~MButton::
-#IfWinActive ahk_class WorkerW
-~MButton::
-    pressed_hotkey = """ + str(Hotkey.DESCRIPTION) + """
-return
-"""
 
 
 @click.command(name=NAME, context_settings={'terminal_width': 100})
@@ -117,7 +89,9 @@ def init():
     global ahk, sub_dir, wallpaper_path
     sub_dir = os.path.join(LOCALAPP_DIR, argv['subreddit'])
     wallpaper_path = os.path.join(LOCALAPP_DIR, argv['subreddit'] + '.png')
-    ahk = Script(script)
+    ahk = Script.from_file(r'script.ahk', format_dict=globals())
+    if getattr(sys, 'frozen', False):
+        ahk.call('HideConsole', os.getppid())
 
     try: os.makedirs(APP_DIR)
     except FileExistsError: pass
@@ -159,9 +133,13 @@ def load_seen():
 
 def log(*args):
     global has_lf
+    console = '\t' + ' '.join(arg['console'] if type(arg) is dict else str(arg) for arg in args)
+    gui = ' '.join(arg['gui'] if type(arg) is dict else str(arg) for arg in args)
     if not has_lf:
         print()
-    print('\t' + ' '.join(str(arg) for arg in args))
+    print(console)
+    ahk.call('GuiTextAppend', 'recent', gui)
+    ahk.call('GuiTextAppend', 'runHistory', console)
     has_lf = True
 
 
@@ -195,13 +173,13 @@ class Hotkeys:
                     is_same_img = monitor['img_basename'] == self.clicked_img
                     if is_dclick and is_same_img:
                         try:
-                            _, url = get_desc_url(**seen_json['last_info'][monitor['img_basename']])
+                            url = get_click_url(**seen_json['last_info'][monitor['img_basename']])
                             webbrowser.open(url)
                             ahk.tooltip("", 0)
                         except KeyError:
                             pass
                     try:
-                        desc, _ = get_desc_url(**seen_json['last_info'][monitor['img_basename']])
+                        desc = get_click_desc(**seen_json['last_info'][monitor['img_basename']])
                     except KeyError:
                         desc = "Missing description."
                     ahk.tooltip(desc, 10)
@@ -210,10 +188,19 @@ class Hotkeys:
                     break
 
 
-def get_desc_url(title, author, permalink):
-    desc = html.unescape(title + ' - u/' + author)
-    url = 'http://reddit.com' + permalink
-    return desc, url
+def get_click_desc(title, author, permalink):
+    return html.unescape(title + ' - u/' + author)
+
+
+def get_click_url(title, author, permalink):
+    return 'http://reddit.com' + permalink
+
+
+def get_gui_link(title, author, permalink):
+    site_link = 'http://reddit.com' + permalink
+    author_link = 'http://reddit.com/user/' + author
+    result = '<a href="{}">{}</a> - <a href="{}">u/{}</a>'.format(site_link, html.unescape(title), author_link, author)
+    return result
 
 
 class Wallpaper:
@@ -221,6 +208,7 @@ class Wallpaper:
         self.last_update_at = minute_dt(datetime.min) if argv['force'] else get_file_modified_at(SEEN_JSON_PATH)
         self.last_cycle_at = self.last_update_at
         self.cycle_minutes_td = timedelta(minutes=argv['cycle_minutes'])
+
         if not argv['force']:
             while minute_dt() - self.last_cycle_at > self.cycle_minutes_td:
                 self.last_cycle_at += self.cycle_minutes_td
@@ -259,7 +247,7 @@ class Wallpaper:
             wallpaper = get_refitted_wallpaper()
             if wallpaper:
                 wallpaper.save(wallpaper_path)
-                set_wallpaper(wallpaper_path)
+                ahk.call_main('SetWallpaper', wallpaper_path)
 
         if not argv['persist']:
             log("exiting")
@@ -288,11 +276,14 @@ def main():
 
     ts = 0
     while True:
-        hotkeys.poll()
-        s_elapsed = time.time() - ts
-        if s_elapsed >= 30:
-            wallpaper.poll()
-            ts = time.time()
+        try:
+            hotkeys.poll()
+            s_elapsed = time.time() - ts
+            if s_elapsed >= 30:
+                wallpaper.poll()
+                ts = time.time()
+        except AhkExitException:
+            return
         time.sleep(0.01)
 
 
@@ -303,7 +294,7 @@ def update_wallpaper():
     try:
         wallpaper, accepted = get_wallpaper()
         wallpaper.save(wallpaper_path)
-        set_wallpaper(wallpaper_path)
+        ahk.call_main('SetWallpaper', wallpaper_path)
         for img_basename in accepted.keys():
             seen_append('accepted', img_basename)
         seen_json['last_accepted'] = list(accepted.keys())
@@ -328,6 +319,7 @@ def print_status(msg=""):
     global has_lf
     status = "* Monitors: '{}' Update frequency: '{}'".format(len(monitors), str(timedelta(minutes=update_every_m))[:-3].zfill(5))
     status += ' ' + msg
+    ahk.call('GuiText', 'status', status)
     status += ' ' * (119 - len(status))
     print(status, end='\r', flush=True)
     has_lf = False
@@ -344,7 +336,11 @@ def get_file_modified_at(path):
 
 def fetch_json(after):
     json_url = "http://www.reddit.com/r/{}/top.json?t=week&limit=100&after={}".format(argv['subreddit'], after)
-    log("fetching", json_url)
+    if not after:
+        ahk.set('recent', '')
+        ahk.call('GuiTextAppend', 'recent', ahk.get('status'))
+        ahk.call('GuiTextAppend', 'runHistory', ahk.get('status'))
+    log("fetching", {'console': json_url, 'gui': '<a href="{0}">{0}</a>'.format(json_url)})
 
     for fetch_attempt_num in range(1, FETCH_RETRY_COUNT + 1):
         try:
@@ -450,8 +446,7 @@ def get_wallpaper():
                         img = validate_img(img_path, monitor)
                         stitch_wallpaper(wallpaper, img, img_path, monitor)
                         new_accepted[img_basename] = {k: v for k, v in img_json['data'].items() if k in ('title', 'author', 'permalink')}
-                        desc, _ = get_desc_url(**new_accepted[img_basename])
-                        log(idx, '"{}"'.format(desc))
+                        log(idx, {'console': '"{}"'.format(get_click_desc(**new_accepted[img_basename])), 'gui': get_gui_link(**new_accepted[img_basename])})
                         raise ImageSuccess
                     except MonitorImageRejectedError:
                         seen_append(rejected_wh, img_basename)
@@ -486,27 +481,6 @@ def stitch_wallpaper(wallpaper, img, img_path, monitor):
         fit_img.save(fit_path)
     wallpaper.paste(fit_img, (monitor['x'] - screen['x'], monitor['y'] - screen['y']))
     monitor['img_basename'] = os.path.basename(img_path)
-
-
-def set_wallpaper(path):
-    com_obj = CreateObject('{C2CF3110-460E-4fc1-B9D0-8A1C0C9CC4BD}', interface=IDesktopWallpaper)
-    try:
-        com_obj.SetWallpaper(None, path)
-        com_obj.SetPosition(DWPOS_SPAN)
-    except COMError as e:
-        log(repr(e))
-    finally:
-        com_obj.Release()
-
-    # AutoHotkey equivalent
-    # ptr := ComObjCreate("{C2CF3110-460E-4fc1-B9D0-8A1C0C9CC4BD}", "{B92B56A9-8B55-4E14-9A89-0199BBB6F93B}")
-    # vTbl := NumGet(ptr + 0, 0, "Ptr")
-    # setWallpaper := NumGet(vTbl + 0, 3 * A_PtrSize, "Ptr")
-    # setPosition := NumGet(vTbl + 0, 10 * A_PtrSize, "Ptr")
-    # DllCall(setWallpaper, "Ptr", ptr, "Str", "", "Str", wallpaperPath)
-    # DWPOS_SPAN := 5
-    # DllCall(setPosition, "Ptr", ptr, "Int", DWPOS_SPAN)
-    # ObjRelease(ptr)
 
 
 def update_monitor_info():
